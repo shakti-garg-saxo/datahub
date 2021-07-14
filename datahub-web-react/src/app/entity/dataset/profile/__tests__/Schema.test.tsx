@@ -8,7 +8,7 @@ describe('Schema', () => {
     it('renders', () => {
         const { getByText, queryAllByTestId } = render(
             <TestPageContainer>
-                <Schema schema={sampleSchema} updateEditableSchema={jest.fn()} />
+                <Schema urn={sampleSchema?.platformUrn || ''} schema={sampleSchema} updateEditableSchema={jest.fn()} />
             </TestPageContainer>,
         );
         expect(getByText('name')).toBeInTheDocument();
@@ -21,7 +21,7 @@ describe('Schema', () => {
     it('renders raw', () => {
         const { getByText, queryAllByTestId } = render(
             <TestPageContainer>
-                <Schema schema={sampleSchema} updateEditableSchema={jest.fn()} />
+                <Schema urn={sampleSchema?.platformUrn || ''} schema={sampleSchema} updateEditableSchema={jest.fn()} />
             </TestPageContainer>,
         );
 
@@ -41,19 +41,28 @@ describe('Schema', () => {
         expect(queryAllByTestId('schema-raw-view')).toHaveLength(0);
     });
 
-    it('renders tags', () => {
+    it('renders tags and terms', () => {
         const { getByText } = render(
             <TestPageContainer>
-                <Schema schema={sampleSchemaWithTags} updateEditableSchema={jest.fn()} />
+                <Schema
+                    urn={sampleSchema?.platformUrn || ''}
+                    schema={sampleSchemaWithTags}
+                    updateEditableSchema={jest.fn()}
+                />
             </TestPageContainer>,
         );
         expect(getByText('Legacy')).toBeInTheDocument();
+        expect(getByText('sample-glossary-term')).toBeInTheDocument();
     });
 
     it('renders description', () => {
         const { getByText } = render(
             <TestPageContainer>
-                <Schema schema={sampleSchemaWithTags} updateEditableSchema={jest.fn()} />
+                <Schema
+                    urn={sampleSchema?.platformUrn || ''}
+                    schema={sampleSchemaWithTags}
+                    updateEditableSchema={jest.fn()}
+                />
             </TestPageContainer>,
         );
         expect(getByText('order id')).toBeInTheDocument();
@@ -62,7 +71,11 @@ describe('Schema', () => {
     it('renders field', () => {
         const { getByText } = render(
             <TestPageContainer>
-                <Schema schema={sampleSchemaWithTags} updateEditableSchema={jest.fn()} />
+                <Schema
+                    urn={sampleSchema?.platformUrn || ''}
+                    schema={sampleSchemaWithTags}
+                    updateEditableSchema={jest.fn()}
+                />
             </TestPageContainer>,
         );
         expect(getByText('shipping_address')).toBeInTheDocument();

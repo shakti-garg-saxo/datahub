@@ -1,17 +1,62 @@
+fragment dataFlowFields on DataFlow {
+    urn
+    type
+    orchestrator
+    flowId
+    cluster
+    info {
+        name
+        description
+        project
+        externalUrl
+        customProperties {
+            key
+            value
+        }
+    }
+    editableProperties {
+        description
+    }
+    ownership {
+        ...ownershipFields
+    }
+    globalTags {
+        ...globalTagsFields
+    }
+}
+
 query getDataFlow($urn: String!) {
     dataFlow(urn: $urn) {
-        urn
-        type
-        orchestrator
-        flowId
-        cluster
-        info {
-            name
-            description
-            project
+        ...dataFlowFields
+        dataJobs {
+            entities {
+                entity {
+                    urn
+                    type
+                    ... on DataJob {
+                        ...dataJobFields
+                        ...shallowLineageFields
+                    }
+                }
+            }
         }
-        ownership {
-            ...ownershipFields
+    }
+}
+
+mutation updateDataFlow($input: DataFlowUpdateInput!) {
+    updateDataFlow(input: $input) {
+        ...dataFlowFields
+        dataJobs {
+            entities {
+                entity {
+                    urn
+                    type
+                    ... on DataJob {
+                        ...dataJobFields
+                        ...shallowLineageFields
+                    }
+                }
+            }
         }
     }
 }

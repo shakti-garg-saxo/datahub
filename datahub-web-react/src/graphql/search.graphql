@@ -5,6 +5,16 @@ query getAutoCompleteResults($input: AutoCompleteInput!) {
     }
 }
 
+query getAutoCompleteAllResults($input: AutoCompleteInput!) {
+    autoCompleteForAll(input: $input) {
+        query
+        suggestions {
+            type
+            suggestions
+        }
+    }
+}
+
 query getSearchResults($input: SearchInput!) {
     search(input: $input) {
         start
@@ -37,6 +47,9 @@ query getSearchResults($input: SearchInput!) {
                     globalTags {
                         ...globalTagsFields
                     }
+                    glossaryTerms {
+                        ...glossaryTerms
+                    }
                 }
                 ... on CorpUser {
                     username
@@ -60,7 +73,7 @@ query getSearchResults($input: SearchInput!) {
                     info {
                         name
                         description
-                        url
+                        externalUrl
                         access
                         lastModified {
                             time
@@ -68,6 +81,9 @@ query getSearchResults($input: SearchInput!) {
                     }
                     ownership {
                         ...ownershipFields
+                    }
+                    globalTags {
+                        ...globalTagsFields
                     }
                 }
                 ... on Chart {
@@ -78,7 +94,7 @@ query getSearchResults($input: SearchInput!) {
                     info {
                         name
                         description
-                        url
+                        externalUrl
                         type
                         access
                         lastModified {
@@ -87,6 +103,9 @@ query getSearchResults($input: SearchInput!) {
                     }
                     ownership {
                         ...ownershipFields
+                    }
+                    globalTags {
+                        ...globalTagsFields
                     }
                 }
                 ... on DataFlow {
@@ -97,10 +116,14 @@ query getSearchResults($input: SearchInput!) {
                     cluster
                     info {
                         name
+                        description
                         project
                     }
                     ownership {
                         ...ownershipFields
+                    }
+                    globalTags {
+                        ...globalTagsFields
                     }
                 }
                 ... on DataJob {
@@ -123,6 +146,23 @@ query getSearchResults($input: SearchInput!) {
                     }
                     info {
                         name
+                        description
+                    }
+                    globalTags {
+                        ...globalTagsFields
+                    }
+                }
+                ... on GlossaryTerm {
+                    name
+                    glossaryTermInfo {
+                        definition
+                        termSource
+                        sourceRef
+                        sourceUrl
+                        customProperties {
+                            key
+                            value
+                        }
                     }
                 }
             }

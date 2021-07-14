@@ -15,6 +15,7 @@ type Props = {
     };
     canvasHeight: number;
     onEntityClick: (EntitySelectParams) => void;
+    onEntityCenter: (EntitySelectParams) => void;
     onLineageExpand: (LineageExpandParams) => void;
     selectedEntity?: EntitySelectParams;
     margin: TreeProps['margin'];
@@ -37,7 +38,7 @@ function findMin(arr) {
 
     for (let i = 0; i < n - 1; i++) {
         const m = arr[i + 1] - arr[i];
-        if (m < min && m > 0) {
+        if ((m < min && m > 0) || min === 0) {
             min = m;
         }
     }
@@ -63,6 +64,7 @@ export default function LineageTreeNodeAndEdgeRenderer({
     margin,
     canvasHeight,
     onEntityClick,
+    onEntityCenter,
     onLineageExpand,
     selectedEntity,
     direction,
@@ -85,7 +87,7 @@ export default function LineageTreeNodeAndEdgeRenderer({
         });
 
         Object.keys(nodesByDepth).forEach((depth) => {
-            if (findMin(nodesByDepth[depth]?.map((entity) => entity.x)) < 90) {
+            if (findMin(nodesByDepth[depth]?.map((entity) => entity.x)) < 130) {
                 debouncedSetYCanvasScale(yCanvasScale * 1.025);
             }
         });
@@ -133,6 +135,7 @@ export default function LineageTreeNodeAndEdgeRenderer({
                         isHovered={isHovered}
                         onHover={(select: EntitySelectParams) => setHoveredEntity(select)}
                         onEntityClick={onEntityClick}
+                        onEntityCenter={onEntityCenter}
                         onExpandClick={onLineageExpand}
                         direction={direction}
                         isCenterNode={tree.data.urn === node.data.urn}

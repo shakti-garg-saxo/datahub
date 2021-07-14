@@ -1,5 +1,6 @@
 package com.linkedin.dataset.client;
 
+import com.linkedin.BatchGetUtils;
 import com.linkedin.common.Status;
 import com.linkedin.common.urn.DatasetUrn;
 import com.linkedin.common.urn.Urn;
@@ -24,7 +25,6 @@ import com.linkedin.metadata.query.SortCriterion;
 import com.linkedin.metadata.restli.BaseBrowsableClient;
 import com.linkedin.metadata.snapshot.DatasetSnapshot;
 import com.linkedin.r2.RemoteInvocationException;
-import com.linkedin.restli.client.BatchGetEntityRequest;
 import com.linkedin.restli.client.Client;
 import com.linkedin.restli.client.GetRequest;
 import com.linkedin.restli.client.Request;
@@ -225,16 +225,13 @@ public class Datasets extends BaseBrowsableClient<Dataset, DatasetUrn> {
     @Nonnull
     public Map<DatasetUrn, Dataset> batchGet(@Nonnull Set<DatasetUrn> urns)
         throws RemoteInvocationException {
-        BatchGetEntityRequest<ComplexResourceKey<DatasetKey, EmptyRecord>, Dataset> batchGetRequest
-            = DATASETS_REQUEST_BUILDERS.batchGet()
-            .ids(urns.stream().map(this::getKeyFromUrn).collect(Collectors.toSet()))
-            .build();
-
-        return _client.sendRequest(batchGetRequest).getResponseEntity().getResults()
-            .entrySet().stream().collect(Collectors.toMap(
-                entry -> getUrnFromKey(entry.getKey()),
-                entry -> entry.getValue().getEntity())
-            );
+        return BatchGetUtils.batchGet(
+                urns,
+                (Void v) -> DATASETS_REQUEST_BUILDERS.batchGet(),
+                this::getKeyFromUrn,
+                this::getUrnFromKey,
+                _client
+        );
     }
 
     /**
@@ -283,10 +280,13 @@ public class Datasets extends BaseBrowsableClient<Dataset, DatasetUrn> {
     }
 
     // Copied from an unused method in Datasets resource.
-    static DatasetSnapshot toSnapshot(@Nonnull final DatasetUrn datasetUrn, @Nonnull final Dataset dataset) {
+    public static DatasetSnapshot toSnapshot(@Nonnull final DatasetUrn datasetUrn, @Nonnull final Dataset dataset) {
         final List<DatasetAspect> aspects = new ArrayList<>();
         if (dataset.getProperties() != null) {
             aspects.add(ModelUtils.newAspectUnion(DatasetAspect.class, getDatasetPropertiesAspect(dataset)));
+        }
+        if (dataset.getEditableProperties() != null) {
+            aspects.add(ModelUtils.newAspectUnion(DatasetAspect.class, dataset.getEditableProperties()));
         }
         if (dataset.getDeprecation() != null) {
             aspects.add(ModelUtils.newAspectUnion(DatasetAspect.class, dataset.getDeprecation()));
@@ -327,6 +327,9 @@ public class Datasets extends BaseBrowsableClient<Dataset, DatasetUrn> {
         }
         if (dataset.getProperties() != null) {
             datasetProperties.setCustomProperties(dataset.getProperties());
+        }
+        if (dataset.getExternalUrl() != null) {
+            datasetProperties.setExternalUrl(dataset.getExternalUrl());
         }
         return datasetProperties;
     }

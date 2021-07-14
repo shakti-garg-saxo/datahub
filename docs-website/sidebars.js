@@ -1,7 +1,7 @@
 const fs = require("fs");
 
 function list_ids_in_directory(directory) {
-  const files = fs.readdirSync(`../${directory}`);
+  const files = fs.readdirSync(`../${directory}`).sort();
   let ids = [];
   for (const name of files) {
     if (fs.lstatSync(`../${directory}/${name}`).isDirectory()) {
@@ -10,12 +10,15 @@ function list_ids_in_directory(directory) {
       ids = ids.concat(inner_ids);
     } else {
       if (name.endsWith(".md")) {
-        const id = `${directory}/${name}`.replace(/\.md$/, "");
+        const slug = name.replace(/\.md$/, "");
+        let id = `${directory}/${slug}`;
+        if (id.match(/\/\d+-.+/)) {
+          id = id.replace(/\/\d+-/, "/");
+        }
         ids.push(id);
       }
     }
   }
-  ids.sort();
   return ids;
 }
 
@@ -29,11 +32,13 @@ module.exports = {
   overviewSidebar: {
     DataHub: [
       "README",
-      "docs/faq",
+      // "docs/faq", // hide from sidebar: out of date
       "docs/features",
       "docs/roadmap",
       "docs/CONTRIBUTING",
       "docs/demo",
+      "docs/saas",
+      "releases",
     ],
     "Getting Started": [
       // Serves as user guides.
@@ -50,35 +55,41 @@ module.exports = {
       "datahub-web-react/README",
     ],
     "Metadata Modeling": [
+      "docs/modeling/metadata-model",
+      "docs/modeling/extending-the-metadata-model",
       // TODO: change the titles of these, removing the "What is..." portion from the sidebar"
-      "docs/what/entity",
-      "docs/what/aspect",
-      "docs/what/urn",
-      "docs/what/relationship",
-      "docs/what/search-document",
-      "docs/what/snapshot",
-      "docs/what/delta",
-      "docs/what/mxe",
+      // "docs/what/entity",
+      // "docs/what/aspect",
+      // "docs/what/urn",
+      // "docs/what/relationship",
+      // "docs/what/search-document",
+      // "docs/what/snapshot",
+      // "docs/what/delta",
+      // "docs/what/mxe",
     ],
     "Developer Guides": [
       // TODO: the titles of these should not be in question form in the sidebar
       "docs/developers",
       "docs/docker/development",
-      "metadata-ingestion/README",
-      "docs/what/graph",
-      "docs/what/search-index",
-      "docs/how/add-new-aspect",
-      "docs/how/build-metadata-service",
-      "docs/how/customize-elasticsearch-query-template",
-      "docs/how/entity-onboarding",
-      "docs/how/graph-onboarding",
-      "docs/how/metadata-modelling",
-      "docs/demo/graph-onboarding",
-      "docs/how/search-onboarding",
-      "docs/how/search-over-new-field",
-      "docs/how/configure-oidc-react",
-      "docs/how/sso/configure-oidc-react-google",
-      "docs/how/sso/configure-oidc-react-okta",
+      "metadata-ingestion/adding-source",
+      "metadata-ingestion/s3-ingestion",
+      //"docs/what/graph",
+      //"docs/what/search-index",
+      //"docs/how/add-new-aspect",
+      //"docs/how/build-metadata-service",
+      //"docs/how/customize-elasticsearch-query-template",
+      //"docs/how/entity-onboarding",
+      //"docs/how/graph-onboarding",
+      // "docs/how/metadata-modelling",
+      //"docs/demo/graph-onboarding",
+      //"docs/how/search-onboarding",
+      //"docs/how/search-over-new-field",
+      "docs/how/auth/jaas",
+      "docs/how/auth/sso/configure-oidc-react",
+      "docs/how/auth/sso/configure-oidc-react-google",
+      "docs/how/auth/sso/configure-oidc-react-okta",
+      "docs/how/restore-indices",
+      "datahub-web-react/src/app/analytics/README",
     ],
     Components: [
       "datahub-web-react/README",
@@ -92,10 +103,13 @@ module.exports = {
       "metadata-ingestion/developing",
     ],
     "Advanced Guides": [
+      "docs/advanced/no-code-modeling",
       "docs/advanced/aspect-versioning",
       "docs/advanced/es-7-upgrade",
       "docs/advanced/high-cardinality",
       "docs/how/scsi-onboarding-guide",
+      "docs/advanced/no-code-upgrade",
+      "docs/how/migrating-graph-service-implementation",
       // WIP "docs/advanced/backfilling",
       // WIP "docs/advanced/derived-aspects",
       // WIP "docs/advanced/entity-hierarchy",
@@ -105,7 +119,10 @@ module.exports = {
     Deployment: [
       "docs/how/kafka-config",
       "docker/README",
-      "contrib/kubernetes/README",
+      "docs/deploy/kubernetes",
+      "docker/datahub-upgrade/README",
+      "docs/deploy/aws",
+      "docs/deploy/gcp",
       // Purposely not including the following:
       // - "docker/datahub-frontend/README",
       // - "docker/datahub-gms-graphql-service/README",

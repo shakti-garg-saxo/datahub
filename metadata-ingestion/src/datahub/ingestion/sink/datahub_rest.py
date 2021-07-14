@@ -1,11 +1,13 @@
 import logging
 from dataclasses import dataclass
+from typing import Optional, Union
 
 from datahub.configuration.common import ConfigModel, OperationalError
 from datahub.emitter.rest_emitter import DatahubRestEmitter
 from datahub.ingestion.api.common import PipelineContext, RecordEnvelope, WorkUnit
 from datahub.ingestion.api.sink import Sink, SinkReport, WriteCallback
 from datahub.metadata.com.linkedin.pegasus2avro.mxe import MetadataChangeEvent
+from datahub.metadata.com.linkedin.pegasus2avro.usage import UsageAggregation
 
 logger = logging.getLogger(__name__)
 
@@ -14,6 +16,7 @@ class DatahubRestSinkConfig(ConfigModel):
     """Configuration class for holding connectivity to datahub gms"""
 
     server: str = "http://localhost:8080"
+    token: Optional[str]
 
 
 @dataclass
@@ -26,7 +29,7 @@ class DatahubRestSink(Sink):
         super().__init__(ctx)
         self.config = config
         self.report = SinkReport()
-        self.emitter = DatahubRestEmitter(self.config.server)
+        self.emitter = DatahubRestEmitter(self.config.server, self.config.token)
 
     @classmethod
     def create(cls, config_dict: dict, ctx: PipelineContext) -> "DatahubRestSink":
@@ -41,13 +44,13 @@ class DatahubRestSink(Sink):
 
     def write_record_async(
         self,
-        record_envelope: RecordEnvelope[MetadataChangeEvent],
+        record_envelope: RecordEnvelope[Union[MetadataChangeEvent, UsageAggregation]],
         write_callback: WriteCallback,
     ) -> None:
-        mce = record_envelope.record
+        record = record_envelope.record
 
         try:
-            self.emitter.emit_mce(mce)
+            self.emitter.emit(record)
             self.report.report_record_written(record_envelope)
             write_callback.on_success(record_envelope, {})
         except OperationalError as e:

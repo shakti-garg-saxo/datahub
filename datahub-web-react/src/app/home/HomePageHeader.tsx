@@ -1,15 +1,19 @@
 import React, { useMemo } from 'react';
 import { useHistory } from 'react-router';
-import { Typography, Image, AutoComplete, Input, Row, Button, Carousel } from 'antd';
+import { Typography, Image, Row, Button, Carousel } from 'antd';
 import styled, { useTheme } from 'styled-components';
 
 import { ManageAccount } from '../shared/ManageAccount';
 import { useGetAuthenticatedUser } from '../useGetAuthenticatedUser';
 import { useEntityRegistry } from '../useEntityRegistry';
 import { navigateToSearchUrl } from '../search/utils/navigateToSearchUrl';
-import { GetSearchResultsQuery, useGetAutoCompleteResultsLazyQuery } from '../../graphql/search.generated';
+import { SearchBar } from '../search/SearchBar';
+import { GetSearchResultsQuery, useGetAutoCompleteAllResultsLazyQuery } from '../../graphql/search.generated';
+import { useIsAnalyticsEnabledQuery } from '../../graphql/analytics.generated';
 import { useGetAllEntitySearchResults } from '../../utils/customGraphQL/useGetAllEntitySearchResults';
 import { EntityType } from '../../types.generated';
+import analytics, { EventType } from '../analytics';
+import AnalyticsLink from '../search/AnalyticsLink';
 
 const Background = styled.div`
     width: 100%;
@@ -41,6 +45,7 @@ const styles = {
     searchContainer: { width: '100%', marginTop: '40px' },
     logoImage: { width: 140 },
     searchBox: { width: 540, margin: '40px 0px' },
+    subtitle: { marginTop: '28px', color: '#FFFFFF', fontSize: 12 },
     subHeaderLabel: { marginTop: '-16px', color: '#FFFFFF', fontSize: 12 },
 };
 
@@ -60,9 +65,16 @@ const HeaderContainer = styled.div`
     display: flex;
     flex-direction: column;
     align-items: center;
+    justify-content: center;
 `;
 
-function getSuggestionFieldsFromResult(result: GetSearchResultsQuery): string[] {
+const NavGroup = styled.div`
+    display: flex;
+    align-items: center;
+    justify-content: center;
+`;
+
+function getSuggestionFieldsFromResult(result: GetSearchResultsQuery | undefined): string[] {
     return (
         (result?.search?.searchResults
             ?.map((searchResult) => searchResult.entity)
@@ -98,12 +110,25 @@ function sortRandom() {
 export const HomePageHeader = () => {
     const history = useHistory();
     const entityRegistry = useEntityRegistry();
-    const { data } = useGetAuthenticatedUser();
-    const [getAutoCompleteResults, { data: suggestionsData }] = useGetAutoCompleteResultsLazyQuery();
+    const user = useGetAuthenticatedUser();
+    const [getAutoCompleteResultsForAll, { data: suggestionsData }] = useGetAutoCompleteAllResultsLazyQuery();
     const themeConfig = useTheme();
 
-    const onSearch = (query: string) => {
+    const { data } = useIsAnalyticsEnabledQuery();
+    const isAnalyticsEnabled = data && data.isAnalyticsEnabled;
+
+    const onSearch = (query: string, type?: EntityType) => {
+        if (!query || query.trim().length === 0) {
+            return;
+        }
+        analytics.event({
+            type: EventType.SearchEvent,
+            query,
+            pageNumber: 1,
+            originPath: window.location.pathname,
+        });
         navigateToSearchUrl({
+            type,
             query,
             history,
             entityRegistry,
@@ -111,14 +136,15 @@ export const HomePageHeader = () => {
     };
 
     const onAutoComplete = (query: string) => {
-        getAutoCompleteResults({
-            variables: {
-                input: {
-                    type: entityRegistry.getDefaultSearchEntityType(),
-                    query,
+        if (query && query !== '') {
+            getAutoCompleteResultsForAll({
+                variables: {
+                    input: {
+                        query,
+                    },
                 },
-            },
-        });
+            });
+        }
     };
 
     // fetch some results from each entity to display search suggestions
@@ -154,34 +180,34 @@ export const HomePageHeader = () => {
         <Background>
             <Row justify="space-between" style={styles.navBar}>
                 <WelcomeText>
-                    {data && (
+                    {user && (
                         <>
-                            Welcome back, <b>{data?.corpUser?.info?.firstName || data?.corpUser?.username}</b>.
+                            Welcome back, <b>{user.info?.firstName || user.username}</b>.
                         </>
                     )}
                 </WelcomeText>
-                <ManageAccount
-                    urn={data?.corpUser?.urn || ''}
-                    pictureLink={data?.corpUser?.editableInfo?.pictureLink || ''}
-                    name={data?.corpUser?.info?.firstName || data?.corpUser?.username || undefined}
-                />
+                <NavGroup>
+                    {isAnalyticsEnabled && <AnalyticsLink />}
+                    <ManageAccount
+                        urn={user?.urn || ''}
+                        pictureLink={user?.editableInfo?.pictureLink || ''}
+                        name={user?.info?.firstName || user?.username || undefined}
+                    />
+                </NavGroup>
             </Row>
             <HeaderContainer>
                 <Image src={themeConfig.assets.logoUrl} preview={false} style={styles.logoImage} />
-                <AutoComplete
-                    style={styles.searchBox}
-                    options={suggestionsData?.autoComplete?.suggestions.map((result: string) => ({
-                        value: result,
-                    }))}
-                    onSelect={(value: string) => onSearch(value)}
-                    onSearch={(value: string) => onAutoComplete(value)}
-                >
-                    <Input.Search
-                        placeholder={themeConfig.content.search.searchbarMessage}
-                        onSearch={(value: string) => onSearch(value)}
-                        data-testid="search-input"
-                    />
-                </AutoComplete>
+                {themeConfig.content.subtitle && (
+                    <Typography.Text style={styles.subtitle}>{themeConfig.content.subtitle}</Typography.Text>
+                )}
+                <SearchBar
+                    placeholderText={themeConfig.content.search.searchbarMessage}
+                    suggestions={suggestionsData?.autoCompleteForAll?.suggestions || []}
+                    onSearch={onSearch}
+                    onQueryChange={onAutoComplete}
+                    autoCompleteStyle={styles.searchBox}
+                    entityRegistry={entityRegistry}
+                />
                 {suggestionsToShow.length === 0 && !suggestionsLoading && (
                     <SubHeaderTextNoResults>{themeConfig.content.homepage.homepageMessage}</SubHeaderTextNoResults>
                 )}

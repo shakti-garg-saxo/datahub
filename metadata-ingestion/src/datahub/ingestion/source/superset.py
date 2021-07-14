@@ -6,9 +6,10 @@ import dateutil.parser as dp
 import requests
 
 from datahub.configuration.common import ConfigModel
+from datahub.emitter.mce_builder import DEFAULT_ENV
 from datahub.ingestion.api.common import PipelineContext
 from datahub.ingestion.api.source import Source, SourceReport
-from datahub.ingestion.source.metadata_common import MetadataWorkUnit
+from datahub.ingestion.api.workunit import MetadataWorkUnit
 from datahub.metadata.com.linkedin.pegasus2avro.common import (
     AuditStamp,
     ChangeAuditStamps,
@@ -18,19 +19,13 @@ from datahub.metadata.com.linkedin.pegasus2avro.metadata.snapshot import (
     DashboardSnapshot,
 )
 from datahub.metadata.com.linkedin.pegasus2avro.mxe import MetadataChangeEvent
-from datahub.metadata.schema_classes import ChartInfoClass, DashboardInfoClass
+from datahub.metadata.schema_classes import (
+    ChartInfoClass,
+    ChartTypeClass,
+    DashboardInfoClass,
+)
 
 PAGE_SIZE = 25
-
-
-class SupersetConfig(ConfigModel):
-    # See the Superset /security/login endpoint for details
-    # https://superset.apache.org/docs/rest-api
-    connect_uri: str = "localhost:8088"
-    username: Optional[str] = None
-    password: Optional[str] = None
-    provider: str = "db"
-    options: dict = {}
 
 
 def get_platform_from_sqlalchemy_uri(sqlalchemy_uri: str) -> str:
@@ -58,16 +53,65 @@ def get_platform_from_sqlalchemy_uri(sqlalchemy_uri: str) -> str:
     if sqlalchemy_uri.startswith("mysql"):
         return "mysql"
     if sqlalchemy_uri.startswith("mongodb"):
-        return "mongo"
+        return "mongodb"
     if sqlalchemy_uri.startswith("hive"):
         return "hive"
     return "external"
 
 
+chart_type_from_viz_type = {
+    "line": ChartTypeClass.LINE,
+    "big_number": ChartTypeClass.LINE,
+    "table": ChartTypeClass.TABLE,
+    "dist_bar": ChartTypeClass.BAR,
+    "area": ChartTypeClass.AREA,
+    "bar": ChartTypeClass.BAR,
+    "pie": ChartTypeClass.PIE,
+    "histogram": ChartTypeClass.HISTOGRAM,
+    "big_number_total": ChartTypeClass.LINE,
+    "dual_line": ChartTypeClass.LINE,
+    "line_multi": ChartTypeClass.LINE,
+    "treemap": ChartTypeClass.AREA,
+    "box_plot": ChartTypeClass.BAR,
+}
+
+
+class SupersetConfig(ConfigModel):
+    # See the Superset /security/login endpoint for details
+    # https://superset.apache.org/docs/rest-api
+    connect_uri: str = "localhost:8088"
+    username: Optional[str] = None
+    password: Optional[str] = None
+    provider: str = "db"
+    options: dict = {}
+    env: str = DEFAULT_ENV
+
+
+def get_metric_name(metric):
+    if not metric:
+        return ""
+    if isinstance(metric, str):
+        return metric
+    label = metric.get("label")
+    if label:
+        return label
+
+
+def get_filter_name(filter_obj):
+    sql_expression = filter_obj.get("sqlExpression")
+    if sql_expression:
+        return sql_expression
+
+    clause = filter_obj.get("clause")
+    column = filter_obj.get("subject")
+    operator = filter_obj.get("operator")
+    comparator = filter_obj.get("comparator")
+    return f"{clause} {column} {operator} {comparator}"
+
+
 class SupersetSource(Source):
     config: SupersetConfig
     report: SourceReport
-    env = "PROD"
     platform = "superset"
 
     def __hash__(self):
@@ -138,7 +182,7 @@ class SupersetSource(Source):
                 f"urn:li:dataset:("
                 f"{platform_urn},{database_name + '.' if database_name else ''}"
                 f"{schema_name + '.' if schema_name else ''}"
-                f"{table_name},{self.env})"
+                f"{table_name},{self.config.env})"
             )
             return dataset_urn
         return None
@@ -152,7 +196,7 @@ class SupersetSource(Source):
 
         modified_actor = f"urn:li:corpuser:{(dashboard_data.get('changed_by') or {}).get('username', 'unknown')}"
         modified_ts = int(
-            dp.parse(dashboard_data.get("changed_on_utc", "now")).timestamp()
+            dp.parse(dashboard_data.get("changed_on_utc", "now")).timestamp() * 1000
         )
         title = dashboard_data.get("dashboard_title", "")
         # note: the API does not currently supply created_by usernames due to a bug, but we are required to
@@ -180,6 +224,7 @@ class SupersetSource(Source):
             charts=chart_urns,
             lastModified=last_modified,
             dashboardUrl=dashboard_url,
+            customProperties={},
         )
         dashboard_snapshot.aspects.append(dashboard_info)
         return dashboard_snapshot
@@ -218,7 +263,9 @@ class SupersetSource(Source):
         )
 
         modified_actor = f"urn:li:corpuser:{(chart_data.get('changed_by') or {}).get('username', 'unknown')}"
-        modified_ts = int(dp.parse(chart_data.get("changed_on_utc", "now")).timestamp())
+        modified_ts = int(
+            dp.parse(chart_data.get("changed_on_utc", "now")).timestamp() * 1000
+        )
         title = chart_data.get("slice_name", "")
 
         # note: the API does not currently supply created_by usernames due to a bug, but we are required to
@@ -228,17 +275,39 @@ class SupersetSource(Source):
             created=AuditStamp(time=modified_ts, actor=modified_actor),
             lastModified=AuditStamp(time=modified_ts, actor=modified_actor),
         )
+        chart_type = chart_type_from_viz_type.get(chart_data.get("viz_type", ""))
         chart_url = f"{self.config.connect_uri[:-1]}{chart_data.get('url', '')}"
 
         datasource_id = chart_data.get("datasource_id")
         datasource_urn = self.get_datasource_urn_from_id(datasource_id)
 
+        params = json.loads(chart_data.get("params"))
+        metrics = [
+            get_metric_name(metric)
+            for metric in (params.get("metrics", []) or [params.get("metric")])
+        ]
+        filters = [
+            get_filter_name(filter_obj)
+            for filter_obj in params.get("adhoc_filters", [])
+        ]
+        group_bys = params.get("groupby", []) or []
+        if isinstance(group_bys, str):
+            group_bys = [group_bys]
+
+        custom_properties = {
+            "Metrics": ", ".join(metrics),
+            "Filters": ", ".join(filters),
+            "Dimensions": ", ".join(group_bys),
+        }
+
         chart_info = ChartInfoClass(
+            type=chart_type,
             description="",
             title=title,
             lastModified=last_modified,
             chartUrl=chart_url,
             inputs=[datasource_urn] if datasource_urn else None,
+            customProperties=custom_properties,
         )
         chart_snapshot.aspects.append(chart_info)
         return chart_snapshot

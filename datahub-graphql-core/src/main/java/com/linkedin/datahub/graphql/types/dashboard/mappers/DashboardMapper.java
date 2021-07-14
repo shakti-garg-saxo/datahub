@@ -5,7 +5,9 @@ import com.linkedin.datahub.graphql.generated.Chart;
 import com.linkedin.datahub.graphql.generated.Dashboard;
 import com.linkedin.datahub.graphql.generated.DashboardInfo;
 import com.linkedin.datahub.graphql.generated.EntityType;
+import com.linkedin.datahub.graphql.generated.DashboardEditableProperties;
 import com.linkedin.datahub.graphql.types.common.mappers.AuditStampMapper;
+import com.linkedin.datahub.graphql.types.common.mappers.StringMapMapper;
 import com.linkedin.datahub.graphql.types.mappers.ModelMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.OwnershipMapper;
 import com.linkedin.datahub.graphql.types.common.mappers.StatusMapper;
@@ -41,6 +43,11 @@ public class DashboardMapper implements ModelMapper<com.linkedin.dashboard.Dashb
         if (dashboard.hasGlobalTags()) {
             result.setGlobalTags(GlobalTagsMapper.map(dashboard.getGlobalTags()));
         }
+        if (dashboard.hasEditableProperties()) {
+            final DashboardEditableProperties dashboardEditableProperties = new DashboardEditableProperties();
+            dashboardEditableProperties.setDescription(dashboard.getEditableProperties().getDescription());
+            result.setEditableProperties(dashboardEditableProperties);
+        }
         return result;
     }
 
@@ -54,12 +61,15 @@ public class DashboardMapper implements ModelMapper<com.linkedin.dashboard.Dashb
             chart.setUrn(urn.toString());
             return chart;
         }).collect(Collectors.toList()));
-
+        if (info.hasExternalUrl()) {
+            // TODO: Migrate to using the External URL field for consistency.
+            result.setExternalUrl(info.getDashboardUrl().toString());
+        }
+        if (info.hasCustomProperties()) {
+            result.setCustomProperties(StringMapMapper.map(info.getCustomProperties()));
+        }
         if (info.hasAccess()) {
             result.setAccess(AccessLevel.valueOf(info.getAccess().toString()));
-        }
-        if (info.hasDashboardUrl()) {
-            result.setUrl(info.getDashboardUrl().toString());
         }
         result.setLastModified(AuditStampMapper.map(info.getLastModified().getLastModified()));
         result.setCreated(AuditStampMapper.map(info.getLastModified().getCreated()));

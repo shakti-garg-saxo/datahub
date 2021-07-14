@@ -1,10 +1,11 @@
 package com.linkedin.identity.client;
 
+import com.linkedin.BatchGetUtils;
 import com.linkedin.common.urn.CorpuserUrn;
 import com.linkedin.data.template.StringArray;
 import com.linkedin.identity.CorpUser;
 import com.linkedin.identity.CorpUserEditableInfo;
-import com.linkedin.identity.CorpUserKey;
+import com.linkedin.identity.CorpUserResourceKey;
 import com.linkedin.identity.CorpUsersDoAutocompleteRequestBuilder;
 import com.linkedin.identity.CorpUsersFindBySearchRequestBuilder;
 import com.linkedin.identity.CorpUsersRequestBuilders;
@@ -15,7 +16,6 @@ import com.linkedin.metadata.query.Filter;
 import com.linkedin.metadata.query.SortCriterion;
 import com.linkedin.metadata.restli.BaseSearchableClient;
 import com.linkedin.r2.RemoteInvocationException;
-import com.linkedin.restli.client.BatchGetEntityRequest;
 import com.linkedin.restli.client.Client;
 import com.linkedin.restli.client.CreateIdRequest;
 import com.linkedin.restli.client.GetAllRequest;
@@ -26,7 +26,6 @@ import com.linkedin.restli.common.EmptyRecord;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 
@@ -69,16 +68,13 @@ public class CorpUsers extends BaseSearchableClient<CorpUser> {
   @Nonnull
   public Map<CorpuserUrn, CorpUser> batchGet(@Nonnull Set<CorpuserUrn> urns)
       throws RemoteInvocationException {
-    BatchGetEntityRequest<ComplexResourceKey<CorpUserKey, EmptyRecord>, CorpUser> batchGetRequest
-        = CORP_USERS_REQUEST_BUILDERS.batchGet()
-        .ids(urns.stream().map(this::getKeyFromUrn).collect(Collectors.toSet()))
-        .build();
-
-    return _client.sendRequest(batchGetRequest).getResponseEntity().getResults()
-        .entrySet().stream().collect(Collectors.toMap(
-            entry -> getUrnFromKey(entry.getKey()),
-            entry -> entry.getValue().getEntity())
-        );
+    return BatchGetUtils.batchGet(
+            urns,
+            (Void v) -> CORP_USERS_REQUEST_BUILDERS.batchGet(),
+            this::getKeyFromUrn,
+            this::getUrnFromKey,
+            _client
+    );
   }
 
   /**
@@ -170,22 +166,22 @@ public class CorpUsers extends BaseSearchableClient<CorpUser> {
   }
 
   @Nonnull
-  private CorpUserKey toCorpUserKey(@Nonnull CorpuserUrn urn) {
-    return new CorpUserKey().setName(urn.getUsernameEntity());
+  private CorpUserResourceKey toCorpUserKey(@Nonnull CorpuserUrn urn) {
+    return new CorpUserResourceKey().setName(urn.getUsernameEntity());
   }
 
   @Nonnull
-  protected CorpuserUrn toCorpUserUrn(@Nonnull CorpUserKey key) {
+  protected CorpuserUrn toCorpUserUrn(@Nonnull CorpUserResourceKey key) {
     return new CorpuserUrn(key.getName());
   }
 
   @Nonnull
-  private ComplexResourceKey<CorpUserKey, EmptyRecord> getKeyFromUrn(@Nonnull CorpuserUrn urn) {
+  private ComplexResourceKey<CorpUserResourceKey, EmptyRecord> getKeyFromUrn(@Nonnull CorpuserUrn urn) {
     return new ComplexResourceKey<>(toCorpUserKey(urn), new EmptyRecord());
   }
 
   @Nonnull
-  private CorpuserUrn getUrnFromKey(@Nonnull ComplexResourceKey<CorpUserKey, EmptyRecord> key) {
+  private CorpuserUrn getUrnFromKey(@Nonnull ComplexResourceKey<CorpUserResourceKey, EmptyRecord> key) {
     return toCorpUserUrn(key.getKey());
   }
 }

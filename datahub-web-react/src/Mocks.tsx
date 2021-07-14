@@ -4,19 +4,12 @@ import { GetDataJobDocument } from './graphql/dataJob.generated';
 import { GetBrowsePathsDocument, GetBrowseResultsDocument } from './graphql/browse.generated';
 import {
     GetAutoCompleteResultsDocument,
+    GetAutoCompleteAllResultsDocument,
     GetSearchResultsDocument,
     GetSearchResultsQuery,
 } from './graphql/search.generated';
 import { GetUserDocument } from './graphql/user.generated';
-import {
-    Dataset,
-    DataFlow,
-    DataJob,
-    DatasetLineageType,
-    EntityType,
-    PlatformType,
-    RelatedDataset,
-} from './types.generated';
+import { Dataset, DataFlow, DataJob, GlossaryTerm, EntityType, PlatformType } from './types.generated';
 import { GetTagDocument } from './graphql/tag.generated';
 
 const user1 = {
@@ -35,6 +28,18 @@ const user1 = {
     editableInfo: {
         pictureLink: 'https://crunchconf.com/img/2019/speakers/1559291783-ShirshankaDas.png',
     },
+    globalTags: {
+        tags: [
+            {
+                tag: {
+                    type: EntityType.Tag,
+                    urn: 'urn:li:tag:abc-sample-tag',
+                    name: 'abc-sample-tag',
+                    description: 'sample tag',
+                },
+            },
+        ],
+    },
 };
 
 const user2 = {
@@ -52,6 +57,18 @@ const user2 = {
     },
     editableInfo: {
         pictureLink: null,
+    },
+    globalTags: {
+        tags: [
+            {
+                tag: {
+                    type: EntityType.Tag,
+                    urn: 'urn:li:tag:abc-sample-tag',
+                    name: 'abc-sample-tag',
+                    description: 'sample tag',
+                },
+            },
+        ],
     },
 };
 
@@ -84,6 +101,7 @@ const dataset1 = {
             value: 'My other property value.',
         },
     ],
+    editableProperties: null,
     created: {
         time: 0,
     },
@@ -121,6 +139,7 @@ const dataset1 = {
             },
         ],
     },
+    usageStats: null,
 };
 
 const dataset2 = {
@@ -143,6 +162,7 @@ const dataset2 = {
     description: 'This is some other dataset, so who cares!',
     uri: 'www.google.com',
     properties: [],
+    editableProperties: null,
     created: {
         time: 0,
     },
@@ -168,6 +188,7 @@ const dataset2 = {
             time: 0,
         },
     },
+    usageStats: null,
 };
 
 export const dataset3 = {
@@ -191,6 +212,7 @@ export const dataset3 = {
     description: 'This and here we have yet another Dataset (YAN). Are there more?',
     uri: 'www.google.com',
     properties: [],
+    editableProperties: null,
     created: {
         time: 0,
     },
@@ -228,13 +250,28 @@ export const dataset3 = {
             },
         ],
     },
+    glossaryTerms: {
+        terms: [
+            {
+                term: {
+                    type: EntityType.GlossaryTerm,
+                    urn: 'urn:li:glossaryTerm:sample-glossary-term',
+                    name: 'sample-glossary-term',
+                    glossaryTermInfo: {
+                        definition: 'sample definition',
+                        termSource: 'sample term source',
+                    },
+                },
+            },
+        ],
+    },
     upstreamLineage: null,
     downstreamLineage: null,
     institutionalMemory: {
         elements: [
             {
                 url: 'https://www.google.com',
-                author: 'datahub',
+                author: { urn: 'urn:li:corpuser:datahub', username: 'datahub', type: EntityType.CorpUser },
                 description: 'This only points to Google',
                 created: {
                     actor: 'urn:li:corpuser:1',
@@ -243,9 +280,11 @@ export const dataset3 = {
             },
         ],
     },
-    schema: null,
+    schemaMetadata: null,
+    previousSchemaMetadata: null,
     editableSchemaMetadata: null,
     deprecation: null,
+    usageStats: null,
 } as Dataset;
 
 export const dataset4 = {
@@ -275,71 +314,45 @@ export const dataset7 = {
 export const dataset3WithLineage = {
     ...dataset3,
     upstreamLineage: {
-        upstreams: [
+        entities: [
             {
                 created: {
                     time: 0,
                 },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset7,
+                entity: dataset7,
             },
             {
                 created: {
                     time: 0,
                 },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset4,
+                entity: dataset4,
             },
         ],
-    },
-    downstreamLineage: {
-        downstreams: [],
     },
 };
 
 export const dataset4WithLineage = {
     ...dataset4,
     upstreamLineage: {
-        upstreams: [
+        entities: [
             {
                 created: {
                     time: 0,
                 },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset6,
+                entity: dataset6,
             },
             {
                 created: {
                     time: 0,
                 },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset5,
+                entity: dataset5,
             },
         ],
     },
     downstreamLineage: {
-        downstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset3,
+                entity: dataset3,
             },
         ],
     },
@@ -348,50 +361,22 @@ export const dataset4WithLineage = {
 export const dataset5WithCyclicalLineage = {
     ...dataset5,
     upstreamLineage: {
-        upstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset3,
+                entity: dataset3,
             },
         ],
     },
     downstreamLineage: {
-        downstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset7,
+                entity: dataset7,
             },
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset6,
+                entity: dataset6,
             },
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset4,
+                entity: dataset4,
             },
         ],
     },
@@ -399,40 +384,17 @@ export const dataset5WithCyclicalLineage = {
 
 export const dataset5WithLineage = {
     ...dataset5,
-    upstreamLineage: {
-        upstreams: [] as RelatedDataset[],
-    },
+    upstreamLineage: null,
     downstreamLineage: {
-        downstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset7,
+                entity: dataset7,
             },
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset6,
+                entity: dataset6,
             },
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset4,
+                entity: dataset4,
             },
         ],
     },
@@ -441,30 +403,16 @@ export const dataset5WithLineage = {
 export const dataset6WithLineage = {
     ...dataset6,
     upstreamLineage: {
-        upstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset5,
+                entity: dataset5,
             },
         ],
     },
     downstreamLineage: {
-        downstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset4,
+                entity: dataset4,
             },
         ],
     },
@@ -473,30 +421,16 @@ export const dataset6WithLineage = {
 export const dataset7WithLineage = {
     ...dataset7,
     upstreamLineage: {
-        upstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset5,
+                entity: dataset5,
             },
         ],
     },
     downstreamLineage: {
-        downstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset3,
+                entity: dataset3,
             },
         ],
     },
@@ -505,54 +439,56 @@ export const dataset7WithLineage = {
 export const dataset7WithSelfReferentialLineage = {
     ...dataset7,
     upstreamLineage: {
-        upstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset5,
+                entity: dataset5,
             },
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset7,
+                entity: dataset7,
             },
         ],
     },
     downstreamLineage: {
-        downstreams: [
+        entities: [
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset3,
+                entity: dataset3,
             },
             {
-                created: {
-                    time: 0,
-                },
-                lastModified: {
-                    time: 0,
-                },
-                type: DatasetLineageType.Transformed,
-                dataset: dataset7,
+                entity: dataset7,
             },
         ],
     },
 };
+const glossaryTerm1 = {
+    urn: 'urn:li:glossaryTerm:1',
+    type: EntityType.GlossaryTerm,
+    name: 'Another glossary term',
+    ownership: {
+        owners: [
+            {
+                owner: {
+                    ...user1,
+                },
+                type: 'DATAOWNER',
+            },
+            {
+                owner: {
+                    ...user2,
+                },
+                type: 'DELEGATE',
+            },
+        ],
+        lastModified: {
+            time: 0,
+        },
+    },
+    glossaryTermInfo: {
+        definition: 'New glossary term',
+        termSource: 'termSource',
+        sourceRef: 'sourceRef',
+        sourceURI: 'sourceURI',
+    },
+} as GlossaryTerm;
 
 const sampleTag = {
     urn: 'urn:li:tag:abc-sample-tag',
@@ -591,7 +527,10 @@ export const dataFlow1 = {
         name: 'DataFlowInfoName',
         description: 'DataFlowInfo1 Description',
         project: 'DataFlowInfo1 project',
+        externalUrl: null,
+        customProperties: [],
     },
+    editableProperties: null,
     ownership: {
         owners: [
             {
@@ -610,6 +549,18 @@ export const dataFlow1 = {
         lastModified: {
             time: 0,
         },
+    },
+    globalTags: {
+        tags: [
+            {
+                tag: {
+                    type: EntityType.Tag,
+                    urn: 'urn:li:tag:abc-sample-tag',
+                    name: 'abc-sample-tag',
+                    description: 'sample tag',
+                },
+            },
+        ],
     },
 } as DataFlow;
 
@@ -643,14 +594,154 @@ export const dataJob1 = {
         __typename: 'DataJobInfo',
         name: 'DataJobInfoName',
         description: 'DataJobInfo1 Description',
+        externalUrl: null,
+        customProperties: [],
     },
+    editableProperties: null,
     inputOutput: {
         __typename: 'DataJobInputOutput',
         inputDatasets: [dataset3],
         outputDatasets: [dataset3],
+        inputDatajobs: [],
+    },
+    upstreamLineage: null,
+    downstreamLineage: null,
+    globalTags: {
+        tags: [
+            {
+                tag: {
+                    type: EntityType.Tag,
+                    urn: 'urn:li:tag:abc-sample-tag',
+                    name: 'abc-sample-tag',
+                    description: 'sample tag',
+                },
+            },
+        ],
     },
 } as DataJob;
 
+export const dataJob2 = {
+    __typename: 'DataJob',
+    urn: 'urn:li:dataJob:2',
+    type: EntityType.DataJob,
+    dataFlow: dataFlow1,
+    jobId: 'jobId2',
+    ownership: {
+        __typename: 'Ownership',
+        owners: [
+            {
+                owner: {
+                    ...user1,
+                },
+                type: 'DATAOWNER',
+            },
+            {
+                owner: {
+                    ...user2,
+                },
+                type: 'DELEGATE',
+            },
+        ],
+        lastModified: {
+            time: 0,
+        },
+    },
+    info: {
+        __typename: 'DataJobInfo',
+        name: 'DataJobInfoName2',
+        description: 'DataJobInfo2 Description',
+        externalUrl: null,
+        customProperties: [],
+    },
+    editableProperties: null,
+    inputOutput: {
+        __typename: 'DataJobInputOutput',
+        inputDatasets: [dataset3],
+        outputDatasets: [dataset3],
+        inputDatajobs: [],
+    },
+    upstreamLineage: null,
+    downstreamLineage: null,
+    globalTags: {
+        tags: [
+            {
+                tag: {
+                    type: EntityType.Tag,
+                    urn: 'urn:li:tag:abc-sample-tag',
+                    name: 'abc-sample-tag',
+                    description: 'sample tag',
+                },
+            },
+        ],
+    },
+} as DataJob;
+
+export const dataJob3 = {
+    __typename: 'DataJob',
+    urn: 'urn:li:dataJob:3',
+    type: EntityType.DataJob,
+    dataFlow: dataFlow1,
+    jobId: 'jobId3',
+    ownership: {
+        __typename: 'Ownership',
+        owners: [
+            {
+                owner: {
+                    ...user1,
+                },
+                type: 'DATAOWNER',
+            },
+            {
+                owner: {
+                    ...user2,
+                },
+                type: 'DELEGATE',
+            },
+        ],
+        lastModified: {
+            time: 0,
+        },
+    },
+    info: {
+        __typename: 'DataJobInfo',
+        name: 'DataJobInfoName3',
+        description: 'DataJobInfo3 Description',
+        externalUrl: null,
+        customProperties: [],
+    },
+    editableProperties: null,
+    inputOutput: {
+        __typename: 'DataJobInputOutput',
+        inputDatasets: [dataset3],
+        outputDatasets: [dataset3],
+        inputDatajobs: [],
+    },
+    upstreamLineage: null,
+    downstreamLineage: null,
+    globalTags: {
+        tags: [
+            {
+                tag: {
+                    type: EntityType.Tag,
+                    urn: 'urn:li:tag:abc-sample-tag',
+                    name: 'abc-sample-tag',
+                    description: 'sample tag',
+                },
+            },
+        ],
+    },
+} as DataJob;
+
+dataJob1.upstreamLineage = {
+    entities: [
+        {
+            created: {
+                time: 0,
+            },
+            entity: dataJob3,
+        },
+    ],
+};
 /*
     Define mock data to be returned by Apollo MockProvider. 
 */
@@ -675,6 +766,36 @@ export const mocks = [
             query: GetUserDocument,
             variables: {
                 urn: 'urn:li:corpuser:1',
+            },
+        },
+        result: {
+            data: {
+                corpUser: {
+                    ...user1,
+                },
+            },
+        },
+    },
+    {
+        request: {
+            query: GetUserDocument,
+            variables: {
+                urn: 'urn:li:corpuser:2',
+            },
+        },
+        result: {
+            data: {
+                corpUser: {
+                    ...user1,
+                },
+            },
+        },
+    },
+    {
+        request: {
+            query: GetUserDocument,
+            variables: {
+                urn: 'urn:li:corpuser:datahub',
             },
         },
         result: {
@@ -805,19 +926,23 @@ export const mocks = [
     },
     {
         request: {
-            query: GetAutoCompleteResultsDocument,
+            query: GetAutoCompleteAllResultsDocument,
             variables: {
                 input: {
-                    type: 'DATASET',
                     query: 't',
                 },
             },
         },
         result: {
             data: {
-                autoComplete: {
+                autoCompleteForAll: {
                     query: 't',
-                    suggestions: ['The Great Test Dataset', 'Some other test'],
+                    suggestions: [
+                        {
+                            type: EntityType.Dataset,
+                            suggestions: ['The Great Test Dataset', 'Some other test'],
+                        },
+                    ],
                 },
             },
         },
@@ -935,6 +1060,59 @@ export const mocks = [
                             entity: {
                                 __typename: 'Dataset',
                                 ...dataset3,
+                            },
+                            matchedFields: [],
+                        },
+                    ],
+                    facets: [
+                        {
+                            field: 'origin',
+                            aggregations: [
+                                {
+                                    value: 'PROD',
+                                    count: 3,
+                                },
+                            ],
+                        },
+                        {
+                            field: 'platform',
+                            aggregations: [
+                                { value: 'hdfs', count: 1 },
+                                { value: 'mysql', count: 1 },
+                                { value: 'kafka', count: 1 },
+                            ],
+                        },
+                    ],
+                },
+            } as GetSearchResultsQuery,
+        },
+    },
+    {
+        request: {
+            query: GetSearchResultsDocument,
+            variables: {
+                input: {
+                    type: 'GLOSSARY_TERM',
+                    query: 'tags:abc-sample-tag',
+                    start: 0,
+                    count: 1,
+                    filters: [],
+                },
+            },
+        },
+        result: {
+            data: {
+                __typename: 'Query',
+                search: {
+                    __typename: 'SearchResults',
+                    start: 0,
+                    count: 1,
+                    total: 1,
+                    searchResults: [
+                        {
+                            entity: {
+                                __typename: 'GLOSSARY_TERM',
+                                ...glossaryTerm1,
                             },
                             matchedFields: [],
                         },
@@ -1295,6 +1473,43 @@ export const mocks = [
             data: {
                 dataFlow: {
                     ...dataFlow1,
+                    dataJobs: {
+                        entities: [
+                            {
+                                created: {
+                                    time: 0,
+                                },
+                                entity: dataJob1,
+                            },
+                            {
+                                created: {
+                                    time: 0,
+                                },
+                                entity: dataJob2,
+                            },
+                            {
+                                created: {
+                                    time: 0,
+                                },
+                                entity: dataJob3,
+                            },
+                        ],
+                    },
+                },
+            },
+        },
+    },
+    {
+        request: {
+            query: GetDataJobDocument,
+            variables: {
+                urn: 'urn:li:dataJob:1',
+            },
+        },
+        result: {
+            data: {
+                dataJob: {
+                    ...dataJob1,
                 },
             },
         },
@@ -1350,21 +1565,6 @@ export const mocks = [
                     ],
                 },
             } as GetSearchResultsQuery,
-        },
-    },
-    {
-        request: {
-            query: GetDataJobDocument,
-            variables: {
-                urn: 'urn:li:dataJob:1',
-            },
-        },
-        result: {
-            data: {
-                dataJob: {
-                    ...dataJob1,
-                },
-            },
         },
     },
     {

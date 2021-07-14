@@ -23,6 +23,9 @@ query getBrowseResults($input: BrowseInput!) {
                 ownership {
                     ...ownershipFields
                 }
+                globalTags {
+                    ...globalTagsFields
+                }
             }
             ... on Dashboard {
                 urn
@@ -32,7 +35,7 @@ query getBrowseResults($input: BrowseInput!) {
                 info {
                     name
                     description
-                    url
+                    externalUrl
                     access
                     lastModified {
                         time
@@ -40,6 +43,25 @@ query getBrowseResults($input: BrowseInput!) {
                 }
                 ownership {
                     ...ownershipFields
+                }
+                globalTags {
+                    ...globalTagsFields
+                }
+            }
+            ... on GlossaryTerm {
+                name
+                ownership {
+                    ...ownershipFields
+                }
+                glossaryTermInfo {
+                    definition
+                    termSource
+                    sourceRef
+                    sourceUrl
+                    customProperties {
+                        key
+                        value
+                    }
                 }
             }
             ... on Chart {
@@ -50,7 +72,7 @@ query getBrowseResults($input: BrowseInput!) {
                 info {
                     name
                     description
-                    url
+                    externalUrl
                     type
                     access
                     lastModified {
@@ -59,6 +81,9 @@ query getBrowseResults($input: BrowseInput!) {
                 }
                 ownership {
                     ...ownershipFields
+                }
+                globalTags {
+                    ...globalTagsFields
                 }
             }
             ... on DataFlow {
@@ -69,10 +94,14 @@ query getBrowseResults($input: BrowseInput!) {
                 cluster
                 info {
                     name
+                    description
                     project
                 }
                 ownership {
                     ...ownershipFields
+                }
+                globalTags {
+                    ...globalTagsFields
                 }
             }
         }

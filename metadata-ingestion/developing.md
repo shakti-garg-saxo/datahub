@@ -13,24 +13,16 @@ The architecture of this metadata ingestion framework is heavily inspired by [Ap
 ### Requirements
 
 1. Python 3.6+ must be installed in your host environment.
-2. You also need to build the `mxe-schemas` module as below.
-   ```
-   (cd .. && ./gradlew :metadata-events:mxe-schemas:build)
-   ```
-   This is needed to generate `MetadataChangeEvent.avsc` which is the schema for the `MetadataChangeEvent_v4` Kafka topic.
-3. On MacOS: `brew install librdkafka`
-4. On Debian/Ubuntu: `sudo apt install librdkafka-dev python3-dev python3-venv`
-5. On Fedora (if using LDAP source integration): `sudo yum install openldap-devel`
+2. On MacOS: `brew install librdkafka`
+3. On Debian/Ubuntu: `sudo apt install librdkafka-dev python3-dev python3-venv`
+4. On Fedora (if using LDAP source integration): `sudo yum install openldap-devel`
 
 ### Set up your Python environment
 
-```sh
-python3 -m venv venv
+```shell
+../gradlew :metadata-ingestion:installDev
 source venv/bin/activate
-pip install --upgrade pip wheel setuptools
-pip uninstall datahub || true ; rm -r src/*.egg-info || true
-pip install -e .
-./scripts/codegen.sh
+datahub version  # should print "version: unavailable (installed via git)"
 ```
 
 ### Common setup issues
@@ -44,7 +36,7 @@ If you've already run the pip install, but running `datahub` in your command lin
 
 The easiest way to circumvent this is to install and run via Python, and use `python3 -m datahub` in place of `datahub`.
 
-```sh
+```shell
 python3 -m pip install --upgrade acryl-datahub
 python3 -m datahub --help
 ```
@@ -56,7 +48,7 @@ python3 -m datahub --help
 
 This means Python's `wheel` is not installed. Try running the following commands and then retry.
 
-```sh
+```shell
 pip install --upgrade pip wheel setuptools
 pip cache purge
 ```
@@ -91,28 +83,34 @@ The syntax for installing plugins is slightly different in development. For exam
 
 Contributions welcome!
 
+Also take a look at the guide to [adding a source](./adding-source.md).
+
 ### Testing
 
-```sh
+```shell
 # Follow standard install from source procedure - see above.
 
 # Install, including all dev requirements.
 pip install -e '.[dev]'
 
 # Run unit tests.
-pytest tests/unit
+pytest -m 'not slow'
 
-# Run integration tests. Note that the integration tests require docker.
-pytest tests/integration
+# Run Docker-based integration tests.
+pytest -m 'slow'
 ```
 
 ### Sanity check code before committing
 
-```sh
+```shell
 # Assumes: pip install -e '.[dev]'
 black .
 isort .
 flake8 .
 mypy .
 pytest
+
+# These steps are all included in the gradle build:
+../gradlew :metadata-ingestion:lintFix
+../gradlew :metadata-ingestion:check
 ```
