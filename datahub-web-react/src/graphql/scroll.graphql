@@ -1,0 +1,307 @@
+fragment downloadSearchResults on Entity {
+    urn
+    type
+    ... on HasName {
+        name
+    }
+    ... on HasPlatform {
+        platform {
+            ...platformFields
+        }
+    }
+    ... on HasDataPlatformInstance {
+        dataPlatformInstance {
+            ...dataPlatformInstanceFields
+        }
+    }
+    ... on HasEditableProperties {
+        editableProperties {
+            description
+        }
+    }
+    ... on HasOwnership {
+        ownership {
+            ...ownershipFields
+        }
+    }
+    ... on HasGlossaryTerms {
+        glossaryTerms {
+            ...glossaryTerms
+        }
+    }
+    ... on HasSubTypes {
+        subTypes {
+            typeNames
+        }
+    }
+    ... on HasDomain {
+        domain {
+            ...entityDomainWithoutCounts
+        }
+    }
+    ... on HasDeprecation {
+        deprecation {
+            ...deprecationFields
+        }
+    }
+    ... on HasTags {
+        tags {
+            ...globalTagsFields
+        }
+    }
+    ... on HasDescription {
+        description
+    }
+    ... on Dataset {
+        origin
+        uri
+        platformNativeType
+        properties {
+            name
+            description
+            qualifiedName
+            customProperties {
+                key
+                value
+            }
+            externalUrl
+        }
+        globalTags {
+            ...globalTagsFields
+        }
+        ...entityDataProduct
+    }
+    ... on CorpUser {
+        username
+        properties {
+            active
+            displayName
+            title
+            firstName
+            lastName
+            fullName
+            email
+        }
+        info {
+            active
+            displayName
+            title
+            firstName
+            lastName
+            fullName
+            email
+        }
+        editableProperties {
+            displayName
+            title
+            pictureLink
+        }
+    }
+    ... on CorpGroup {
+        info {
+            displayName
+            description
+        }
+    }
+    ... on Dashboard {
+        dashboardId
+        properties {
+            name
+            description
+            externalUrl
+            access
+            lastModified {
+                time
+            }
+        }
+        globalTags {
+            ...globalTagsFields
+        }
+        ...entityDataProduct
+    }
+    ... on Chart {
+        chartId
+        properties {
+            name
+            description
+            externalUrl
+            type
+            access
+            lastModified {
+                time
+            }
+            created {
+                time
+            }
+        }
+        globalTags {
+            ...globalTagsFields
+        }
+        ...entityDataProduct
+    }
+    ... on DataFlow {
+        flowId
+        cluster
+        properties {
+            name
+            description
+            project
+            externalUrl
+        }
+        globalTags {
+            ...globalTagsFields
+        }
+        ...entityDataProduct
+    }
+    ... on DataJob {
+        dataFlow {
+            ...nonRecursiveDataFlowFields
+        }
+        jobId
+        properties {
+            name
+            description
+            externalUrl
+        }
+        globalTags {
+            ...globalTagsFields
+        }
+        ...entityDataProduct
+    }
+    ... on GlossaryTerm {
+        name
+        hierarchicalName
+        properties {
+            name
+            description
+            termSource
+            sourceRef
+            sourceUrl
+            rawSchema
+            customProperties {
+                key
+                value
+            }
+        }
+        ...glossaryTermLifecycleFields
+        parentNodes {
+            ...parentNodesFields
+        }
+    }
+    ... on GlossaryNode {
+        ...glossaryNode
+        parentNodes {
+            ...parentNodesFields
+        }
+    }
+    ... on Domain {
+        properties {
+            name
+            description
+        }
+    }
+    ... on Container {
+        properties {
+            name
+            description
+            externalUrl
+        }
+    }
+    ... on MLFeatureTable {
+        featureTableProperties {
+            description
+            mlFeatures {
+                urn
+            }
+            mlPrimaryKeys {
+                urn
+            }
+        }
+    }
+    ... on MLFeature {
+        ...nonRecursiveMLFeature
+    }
+    ... on MLPrimaryKey {
+        ...nonRecursiveMLPrimaryKey
+    }
+    ... on MLModel {
+        origin
+    }
+    ... on MLModelGroup {
+        origin
+    }
+    ... on Tag {
+        name
+        properties {
+            name
+        }
+        description
+    }
+    ... on DataPlatform {
+        ...nonConflictingPlatformFields
+    }
+    ... on DataProduct {
+        properties {
+            name
+            description
+            externalUrl
+        }
+    }
+}
+
+fragment downloadScrollResult on ScrollResults {
+    nextScrollId
+    count
+    total
+    searchResults {
+        entity {
+            ...downloadSearchResults
+        }
+        matchedFields {
+            name
+            value
+        }
+        insights {
+            text
+            icon
+        }
+    }
+    facets {
+        ...facetFields
+    }
+}
+
+query getDownloadScrollResults($input: ScrollAcrossEntitiesInput!) {
+    scrollAcrossEntities(input: $input) {
+        ...downloadScrollResult
+    }
+}
+
+fragment downloadScrollAcrossLineageResult on ScrollAcrossLineageResults {
+    nextScrollId
+    count
+    total
+    searchResults {
+        degree
+        entity {
+            ...downloadSearchResults
+        }
+        matchedFields {
+            name
+            value
+        }
+        insights {
+            text
+            icon
+        }
+    }
+    facets {
+        ...facetFields
+    }
+}
+
+query getDownloadScrollAcrossLineageResults($input: ScrollAcrossLineageInput!) {
+    scrollAcrossLineage(input: $input) {
+        ...downloadScrollAcrossLineageResult
+    }
+}

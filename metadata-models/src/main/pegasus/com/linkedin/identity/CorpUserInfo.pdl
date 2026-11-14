@@ -1,7 +1,9 @@
 namespace com.linkedin.identity
 
 import com.linkedin.common.CorpuserUrn
+import com.linkedin.common.CustomProperties
 import com.linkedin.common.EmailAddress
+import com.linkedin.common.Urn
 
 /**
  * Linkedin corp user information
@@ -10,10 +12,10 @@ import com.linkedin.common.EmailAddress
   "name": "corpUserInfo"
 }
 @Aspect.EntityUrns = [ "com.linkedin.common.CorpuserUrn" ]
-record CorpUserInfo {
+record CorpUserInfo includes CustomProperties {
 
   /**
-   * Whether the corpUser is active, ref: https://iwww.corp.linkedin.com/wiki/cf/display/GTSD/Accessing+Active+Directory+via+LDAP+tools
+   * Deprecated! Use CorpUserStatus instead. Whether the corpUser is active, ref: https://iwww.corp.linkedin.com/wiki/cf/display/GTSD/Accessing+Active+Directory+via+LDAP+tools
    */
   @Searchable = {
     "fieldType": "BOOLEAN",
@@ -24,12 +26,32 @@ record CorpUserInfo {
   /**
    * displayName of this user ,  e.g.  Hang Zhang(DataHQ)
    */
+  @Searchable = {
+    "fieldType": "WORD_GRAM",
+    "queryByDefault": true,
+    "enableAutocomplete": true,
+    "boostScore": 10.0,
+    "fieldNameAliases": [ "_entityName" ],
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
   displayName: optional string
 
   /**
    * email address of this user
    */
   @Searchable = {
+    "v3": {
+      "queryByDefault": true
+    },
     "fieldType": "KEYWORD",
     "queryByDefault": true
   }
@@ -39,6 +61,9 @@ record CorpUserInfo {
    * title of this user
    */
   @Searchable = {
+    "v3": {
+      "queryByDefault": true
+    },
     "fieldType": "KEYWORD",
     "queryByDefault": true
   }
@@ -49,12 +74,12 @@ record CorpUserInfo {
    */
   @Relationship = {
     "name": "ReportsTo",
-    "entityTypes": [ "corpUser" ]
+    "entityTypes": [ "corpuser" ]
   }
   @Searchable = {
     "fieldName": "managerLdap",
     "fieldType": "URN",
-    "queryByDefault": true
+    "queryByDefault": false,
   }
   managerUrn: optional CorpuserUrn
 
@@ -82,8 +107,19 @@ record CorpUserInfo {
    * Common name of this user, format is firstName + lastName (split by a whitespace)
    */
   @Searchable = {
-    "fieldType": "TEXT_PARTIAL",
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    },
+    "fieldType": "WORD_GRAM",
     "queryByDefault": true,
+    "enableAutocomplete": true,
     "boostScore": 10.0
   }
   fullName: optional string
@@ -92,4 +128,23 @@ record CorpUserInfo {
    * two uppercase letters country code. e.g.  US
    */
   countryCode: optional string
+
+  /**
+   * Whether the corpUser is a system user.
+   */
+  @Searchable = {
+    "fieldType": "BOOLEAN",
+    "queryByDefault": false
+  }
+  system: optional boolean = false
+
+  /**
+   * Whether the corpUser is a support user authenticated through the support OIDC flow.
+   */
+  @Searchable = {
+    "fieldType": "BOOLEAN",
+    "queryByDefault": false
+  }
+  isSupportUser: optional boolean
+
 }

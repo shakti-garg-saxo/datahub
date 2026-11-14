@@ -2,92 +2,191 @@ package com.linkedin.datahub.graphql.analytics.resolver;
 
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
+import com.linkedin.datahub.graphql.QueryContext;
 import com.linkedin.datahub.graphql.analytics.service.AnalyticsService;
+import com.linkedin.datahub.graphql.analytics.service.EntityStats;
 import com.linkedin.datahub.graphql.generated.DateRange;
+import com.linkedin.datahub.graphql.generated.EntityType;
 import com.linkedin.datahub.graphql.generated.Highlight;
 import graphql.schema.DataFetcher;
 import graphql.schema.DataFetchingEnvironment;
+import io.datahubproject.metadata.context.OperationContext;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
+import javax.annotation.Nonnull;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.joda.time.DateTime;
 
-
-/**
- * Retrieves the Highlights to be rendered of the Analytics screen of the DataHub application.
- */
+/** Retrieves the Highlights to be rendered of the Analytics screen of the DataHub application. */
+@RequiredArgsConstructor
+@Slf4j
 public final class GetHighlightsResolver implements DataFetcher<List<Highlight>> {
+
+  private static final String BROWSER_ID = "browserId";
+  private static final String CURRENT_SUFFIX = "_current";
+  private static final String PREVIOUS_SUFFIX = "_previous";
+  private static final String WEEKLY = "weekly";
+  private static final String MONTHLY = "monthly";
+
+  private static final String HAS_OWNERS = "hasOwners";
+  private static final String HAS_TAGS = "hasTags";
+  private static final String HAS_GLOSSARY_TERMS = "hasGlossaryTerms";
+  private static final String HAS_DESCRIPTION = "hasDescription";
+  private static final String HAS_DOMAIN = "hasDomain";
+
+  private static final List<String> ENTITY_FACETS =
+      ImmutableList.of(HAS_OWNERS, HAS_TAGS, HAS_GLOSSARY_TERMS, HAS_DESCRIPTION, HAS_DOMAIN);
+
+  /** Entity types shown as metadata-statistics highlights, in display order. */
+  private static final Map<EntityType, String> ENTITY_TITLES =
+      ImmutableMap.<EntityType, String>builder()
+          .put(EntityType.DATASET, "Datasets")
+          .put(EntityType.DASHBOARD, "Dashboards")
+          .put(EntityType.CHART, "Charts")
+          .put(EntityType.DATA_FLOW, "Pipelines")
+          .put(EntityType.DATA_JOB, "Tasks")
+          .put(EntityType.DOMAIN, "Domains")
+          .build();
 
   private final AnalyticsService _analyticsService;
 
-  public GetHighlightsResolver(final AnalyticsService analyticsService) {
-    _analyticsService = analyticsService;
-  }
-
   @Override
   public final List<Highlight> get(DataFetchingEnvironment environment) throws Exception {
-    return getHighlights();
+    final QueryContext context = environment.getContext();
+    try {
+      return getHighlights(context.getOperationContext());
+    } catch (Exception e) {
+      log.error("Failed to retrieve analytics highlights!", e);
+      return Collections.emptyList(); // Simply return nothing.
+    }
   }
 
-  /**
-   * TODO: Config Driven Charts Instead of Hardcoded.
-   */
-  private List<Highlight> getHighlights() {
+  /** TODO: Config Driven Charts Instead of Hardcoded. */
+  private List<Highlight> getHighlights(@Nonnull final OperationContext opContext) {
     final List<Highlight> highlights = new ArrayList<>();
 
-    DateTime endDate = DateTime.now();
-    DateTime startDate = endDate.minusWeeks(1);
-    DateTime lastWeekStartDate = startDate.minusWeeks(1);
-    DateRange dateRange = new DateRange(String.valueOf(startDate.getMillis()), String.valueOf(endDate.getMillis()));
-    DateRange dateRangeLastWeek =
-        new DateRange(String.valueOf(lastWeekStartDate.getMillis()), String.valueOf(startDate.getMillis()));
+    // Every window on this page hangs off one canonical clock read, so a dashboard refresh inside
+    // the same bucket re-issues an identical aggregation.
+    //
+    // Both bounds come from the floored reference rather than ceiling the current window's end.
+    // These highlights render a percent change between the current and previous period, which is
+    // only meaningful if the two windows are the same width - so a fair comparison is worth more
+    // here than EXPAND's superset guarantee. The effect is that the newest partial bucket is
+    // excluded from both windows equally. With canonicalization off this is the raw clock reading,
+    // i.e. today's behavior exactly.
+    final DateTime anchor = new DateTime(opContext.canonicalNow().reference());
+    final Map<String, DateRange> ranges = new LinkedHashMap<>();
+    addPeriod(ranges, WEEKLY, anchor, date -> date.minusWeeks(1));
+    addPeriod(ranges, MONTHLY, anchor, date -> date.minusMonths(1));
 
-    // Highlight 1: The Highlights!
-    String title = "Weekly Active Users";
-    String eventType = "SearchEvent";
+    final Map<String, Integer> activeUsers =
+        _analyticsService.getUniqueCountsByRange(
+            opContext, _analyticsService.getUsageIndexName(opContext), ranges, BROWSER_ID);
 
-    int weeklyActiveUsers =
-        _analyticsService.getHighlights(AnalyticsService.DATAHUB_USAGE_EVENT_INDEX, Optional.of(dateRange),
-            ImmutableMap.of(), ImmutableMap.of(), Optional.of("browserId"));
+    highlights.add(
+        buildTimeBasedHighlight(
+            "Weekly Active Users", "%.2f%% %s from last week", activeUsers, WEEKLY));
+    highlights.add(
+        buildTimeBasedHighlight(
+            "Monthly Active Users", "%.2f%% %s from last month", activeUsers, MONTHLY));
 
-    int weeklyActiveUsersLastWeek =
-        _analyticsService.getHighlights(AnalyticsService.DATAHUB_USAGE_EVENT_INDEX, Optional.of(dateRangeLastWeek),
-            ImmutableMap.of(), ImmutableMap.of(), Optional.of("browserId"));
+    // Entity metadata statistics
+    final Map<EntityType, EntityStats> entityStats =
+        _analyticsService.getEntityStats(
+            opContext, ImmutableList.copyOf(ENTITY_TITLES.keySet()), ENTITY_FACETS);
+    ENTITY_TITLES.forEach(
+        (entityType, title) ->
+            buildEntityMetadataHighlight(title, entityType, entityStats.get(entityType))
+                .ifPresent(highlights::add));
 
-    String bodyText = "";
-    if (weeklyActiveUsersLastWeek > 0) {
-      Double percentChange =
-          (Double.valueOf(weeklyActiveUsers) - Double.valueOf(weeklyActiveUsersLastWeek)) / Double.valueOf(
-              weeklyActiveUsersLastWeek) * 100;
-
-      String directionChange = percentChange > 0 ? "increase" : "decrease";
-
-      bodyText = Double.isInfinite(percentChange) ? ""
-          : String.format("%.2f%% %s from last week", percentChange, directionChange);
-    }
-
-    highlights.add(Highlight.builder().setTitle(title).setValue(weeklyActiveUsers).setBody(bodyText).build());
-
-    // Entity metdata statistics
-    highlights.add(getEntityMetadataStats("Datasets", AnalyticsService.DATASET_INDEX));
-    highlights.add(getEntityMetadataStats("Dashboards", AnalyticsService.DASHBOARD_INDEX));
-    highlights.add(getEntityMetadataStats("Charts", AnalyticsService.CHART_INDEX));
-    highlights.add(getEntityMetadataStats("Pipelines", AnalyticsService.DATA_FLOW_INDEX));
-    highlights.add(getEntityMetadataStats("Tasks", AnalyticsService.DATA_JOB_INDEX));
     return highlights;
   }
 
-  private Highlight getEntityMetadataStats(String title, String index) {
-    int numEntities = _analyticsService.getHighlights(index, Optional.empty(), ImmutableMap.of(),
-        ImmutableMap.of("removed", ImmutableList.of("true")), Optional.empty());
-    int numEntitiesWithOwners =
-        _analyticsService.getHighlights(index, Optional.empty(), ImmutableMap.of("hasOwners", ImmutableList.of("true")),
-            ImmutableMap.of("removed", ImmutableList.of("true")), Optional.empty());
+  private void addPeriod(
+      final Map<String, DateRange> ranges,
+      final String period,
+      final DateTime endDateTime,
+      final Function<DateTime, DateTime> periodStartFunc) {
+    DateTime startDate = periodStartFunc.apply(endDateTime);
+    DateTime timeBeforeThat = periodStartFunc.apply(startDate);
+    ranges.put(
+        period + CURRENT_SUFFIX,
+        new DateRange(
+            String.valueOf(startDate.getMillis()), String.valueOf(endDateTime.getMillis())));
+    ranges.put(
+        period + PREVIOUS_SUFFIX,
+        new DateRange(
+            String.valueOf(timeBeforeThat.getMillis()), String.valueOf(startDate.getMillis())));
+  }
+
+  private Highlight buildTimeBasedHighlight(
+      final String title,
+      final String changeString,
+      final Map<String, Integer> activeUsers,
+      final String period) {
+    int activeUsersThisRange = activeUsers.getOrDefault(period + CURRENT_SUFFIX, 0);
+    int activeUsersLastRange = activeUsers.getOrDefault(period + PREVIOUS_SUFFIX, 0);
+
     String bodyText = "";
-    if (numEntities > 0) {
-      double percentChange = 100.0 * numEntitiesWithOwners / numEntities;
-      bodyText = String.format("%.2f%% have owners assigned!", percentChange);
+    if (activeUsersLastRange > 0) {
+      double percentChange =
+          (double) (activeUsersThisRange - activeUsersLastRange)
+              / (double) activeUsersLastRange
+              * 100;
+
+      String directionChange = percentChange > 0 ? "increase" : "decrease";
+
+      bodyText =
+          Double.isInfinite(percentChange)
+              ? ""
+              : String.format(changeString, percentChange, directionChange);
     }
-    return Highlight.builder().setTitle(title).setValue(numEntities).setBody(bodyText).build();
+    return Highlight.builder()
+        .setTitle(title)
+        .setValue(activeUsersThisRange)
+        .setBody(bodyText)
+        .build();
+  }
+
+  private Optional<Highlight> buildEntityMetadataHighlight(
+      final String title, final EntityType entityType, final EntityStats stats) {
+    // If there are no entities for the type, do not show the highlight
+    if (stats == null || stats.getTotal() == 0) {
+      return Optional.empty();
+    }
+
+    int numEntities = stats.getTotal();
+    double percentWithOwners = 100.0 * stats.countWithFacet(HAS_OWNERS) / numEntities;
+    double percentWithTags = 100.0 * stats.countWithFacet(HAS_TAGS) / numEntities;
+    double percentWithGlossaryTerms =
+        100.0 * stats.countWithFacet(HAS_GLOSSARY_TERMS) / numEntities;
+    double percentWithDescription = 100.0 * stats.countWithFacet(HAS_DESCRIPTION) / numEntities;
+
+    String bodyText;
+    if (entityType == EntityType.DOMAIN) {
+      // Don't show percent with domain when asking for stats regarding domains
+      bodyText =
+          String.format(
+              "%.2f%% have owners, %.2f%% have tags, %.2f%% have glossary terms, %.2f%% have description!",
+              percentWithOwners, percentWithTags, percentWithGlossaryTerms, percentWithDescription);
+    } else {
+      double percentWithDomains = 100.0 * stats.countWithFacet(HAS_DOMAIN) / numEntities;
+      bodyText =
+          String.format(
+              "%.2f%% have owners, %.2f%% have tags, %.2f%% have glossary terms, %.2f%% have description, %.2f%% have domain assigned!",
+              percentWithOwners,
+              percentWithTags,
+              percentWithGlossaryTerms,
+              percentWithDescription,
+              percentWithDomains);
+    }
+    return Optional.of(
+        Highlight.builder().setTitle(title).setValue(numEntities).setBody(bodyText).build());
   }
 }

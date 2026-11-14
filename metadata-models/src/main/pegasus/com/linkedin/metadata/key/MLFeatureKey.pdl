@@ -12,6 +12,12 @@ record MLFeatureKey {
    * Namespace for the feature
    */
   @Searchable = {
+    "v3": {
+      "queryByDefault": false,
+      "searchLabel": "location",
+      "copyToOther": true,
+      "boostScore": 1.0
+    },
     "fieldType": "TEXT_PARTIAL",
   }
   featureNamespace: string
@@ -20,9 +26,20 @@ record MLFeatureKey {
    * Name of the feature
    */
   @Searchable = {
-    "fieldType": "TEXT_PARTIAL",
+    "fieldType": "WORD_GRAM",
     "enableAutocomplete": true,
-    "boostScore": 8.0
+    "boostScore": 10.0,
+    "fieldNameAliases": [ "_entityName" ],
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
   }
   name: string
 }

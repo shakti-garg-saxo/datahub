@@ -10,11 +10,11 @@ from datahub.metadata.com.linkedin.pegasus2avro.common import (
 )
 from datahub.metadata.com.linkedin.pegasus2avro.dataset import DatasetProperties
 from datahub.metadata.com.linkedin.pegasus2avro.metadata.snapshot import DatasetSnapshot
-from locust import HttpUser, between, task
+from locust import HttpUser, constant, task
 
 
 class IngestUser(HttpUser):
-    wait_time = between(1, 5)
+    wait_time = constant(1)
 
     @task
     def ingest(self):
@@ -59,6 +59,6 @@ class IngestUser(HttpUser):
         return Ownership(
             [
                 Owner(f"urn:li:corpuser:test_{id}", OwnershipType.DATAOWNER),
-                Owner(f"urn:li:corpuser:common", OwnershipType.DATAOWNER),
+                Owner("urn:li:corpuser:common", OwnershipType.DATAOWNER),
             ]
         )

@@ -1,9 +1,11 @@
-import json
+from unittest.mock import patch
 
+import time_machine
 from botocore.stub import Stubber
-from freezegun import freeze_time
 
+import datahub.ingestion.source.aws.sagemaker_processors.models
 from datahub.ingestion.api.common import PipelineContext
+from datahub.ingestion.sink.file import write_metadata_file
 from datahub.ingestion.source.aws.sagemaker import (
     SagemakerSource,
     SagemakerSourceConfig,
@@ -12,8 +14,9 @@ from datahub.ingestion.source.aws.sagemaker_processors.jobs import (
     job_type_to_info,
     job_types,
 )
-from tests.test_helpers import mce_helpers
-from tests.unit.test_sagemaker_source_stubs import (
+from datahub.testing import mce_helpers
+from datahub.testing.doctest import assert_doctest
+from tests.unit.sagemaker.test_sagemaker_source_stubs import (
     describe_endpoint_response_1,
     describe_endpoint_response_2,
     describe_feature_group_response_1,
@@ -49,13 +52,11 @@ def sagemaker_source() -> SagemakerSource:
     )
 
 
-@freeze_time(FROZEN_TIME)
+@time_machine.travel(FROZEN_TIME, tick=False)
 def test_sagemaker_ingest(tmp_path, pytestconfig):
-
     sagemaker_source_instance = sagemaker_source()
 
     with Stubber(sagemaker_source_instance.sagemaker_client) as sagemaker_stubber:
-
         sagemaker_stubber.add_response(
             "list_actions",
             list_actions_response,
@@ -154,7 +155,6 @@ def test_sagemaker_ingest(tmp_path, pytestconfig):
         )
 
         for job_type in job_types:
-
             job = job_stubs[job_type.value]
 
             job_info = job_type_to_info[job_type]
@@ -166,7 +166,6 @@ def test_sagemaker_ingest(tmp_path, pytestconfig):
             )
 
         for job_type in job_types:
-
             job = job_stubs[job_type.value]
 
             job_info = job_type_to_info[job_type]
@@ -225,17 +224,27 @@ def test_sagemaker_ingest(tmp_path, pytestconfig):
             {"ModelName": "the-second-model"},
         )
 
-        mce_objects = [
-            wu.metadata.to_obj() for wu in sagemaker_source_instance.get_workunits()
-        ]
-
-        with open(str(tmp_path / "sagemaker_mces.json"), "w") as f:
-            json.dump(mce_objects, f, indent=2)
+        # Patch the client factory's get_client method to return the stubbed client for jobs
+        with patch.object(
+            sagemaker_source_instance.client_factory,
+            "get_client",
+            return_value=sagemaker_source_instance.sagemaker_client,
+        ):
+            # Run the test and generate the work units
+            mce_objects = [
+                wu.metadata for wu in sagemaker_source_instance.get_workunits()
+            ]
+            write_metadata_file(tmp_path / "sagemaker.json", mce_objects)
 
     # Verify the output.
     test_resources_dir = pytestconfig.rootpath / "tests/unit/sagemaker"
     mce_helpers.check_golden_file(
         pytestconfig,
-        output_path=tmp_path / "sagemaker_mces.json",
-        golden_path=test_resources_dir / "sagemaker_mces_golden.json",
+        output_path=tmp_path / "sagemaker.json",
+        golden_path=test_resources_dir / "sagemaker_golden.json",
+        fail_on_output_mces=True,
     )
+
+
+def test_doc_test_run() -> None:
+    assert_doctest(datahub.ingestion.source.aws.sagemaker_processors.models)

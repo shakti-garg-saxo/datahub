@@ -1,0 +1,68 @@
+namespace com.linkedin.dataset
+
+import com.linkedin.common.Urn
+
+/**
+ * Details about a View. 
+ * e.g. Gets activated when subTypes is view
+ */
+@Aspect = {
+  "name": "viewProperties",
+  "schemaVersion": 3
+}
+record ViewProperties {
+
+  /**
+   * Whether the view is materialized
+   */
+  @Searchable = {
+    "fieldType": "BOOLEAN"
+  }
+  materialized: boolean
+
+  /**
+   * The view logic
+   */
+  @Searchable = {
+    "fieldType": "RICH_TEXT",
+    "queryByDefault": false,
+    "v3": {
+      "queryByDefault": false,
+      "boostScore": 0.5,
+      "searchLabel": "queryText",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  viewLogic: string
+
+  /**
+   * The formatted view logic. This is particularly used for SQL sources, where the SQL
+   * logic is formatted for better readability, and with dbt, where this contains the
+   * compiled SQL logic.
+   */
+  @Searchable = {
+    "fieldType": "RICH_TEXT",
+    "queryByDefault": false,
+    "v3": {
+      "queryByDefault": false,
+      "boostScore": 0.5,
+      "searchLabel": "queryText",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  formattedViewLogic: optional string
+
+  /**
+   * The view logic language / dialect
+   */
+  viewLanguage: string
+
+}

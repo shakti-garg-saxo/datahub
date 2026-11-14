@@ -24,7 +24,17 @@ record GlossaryRelatedTerms {
     "/*": {
       "fieldName": "isRelatedTerms",
       "fieldType": "URN",
-      "boostScore": 2.0
+      "queryByDefault": false,
+      "hasValuesFieldName": "hasGlossaryTerms",
+      "v3": {
+        "queryByDefault": false,
+        "boostScore": 0.25,
+        "searchLabel": "glossaryTerms",
+        "degree": 1,
+        "mappings": [
+          { "type": "URN" }
+        ]
+      }
     }
   }
   isRelatedTerms: optional array[GlossaryTermUrn]
@@ -42,8 +52,77 @@ record GlossaryRelatedTerms {
     "/*": {
       "fieldName": "hasRelatedTerms",
       "fieldType": "URN",
-      "boostScore": 2.0
+      "queryByDefault": false,
+      "hasValuesFieldName": "hasGlossaryTerms",
+      "v3": {
+        "queryByDefault": false,
+        "boostScore": 0.25,
+        "searchLabel": "glossaryTerms",
+        "degree": 1,
+        "mappings": [
+          { "type": "URN" }
+        ]
+      }
     }
   }
   hasRelatedTerms: optional array[GlossaryTermUrn]
+
+  /**
+   * The relationship Has Value with glossary term.
+   * These are fixed value a term has. For example a ColorEnum where RED, GREEN and YELLOW are fixed values.
+   */
+  @Relationship = {
+    "/*": {
+      "name": "HasValue",
+      "entityTypes": [ "glossaryTerm" ]
+    }
+  }
+  @Searchable = {
+    "/*": {
+      "fieldName": "values",
+      "fieldType": "URN",
+      "queryByDefault": false,
+      "hasValuesFieldName": "hasGlossaryTerms",
+      "v3": {
+        "queryByDefault": false,
+        "boostScore": 0.25,
+        "searchLabel": "glossaryTerms",
+        "degree": 1,
+        "mappings": [
+          { "type": "URN" }
+        ]
+      }
+    }
+  }
+  values: optional array[GlossaryTermUrn]
+
+
+  /**
+   * The relationship isRelatedTo with glossary term
+   */
+  @Relationship = {
+    "/*": {
+      "name": "IsRelatedTo",
+      "entityTypes": [ "glossaryTerm" ]
+    }
+  }
+  @Searchable = {
+    "/*": {
+      "fieldName": "relatedTerms",
+      "fieldType": "URN",
+      "boostScore": 0.5,
+      "hasValuesFieldName": "hasGlossaryTerms",
+      "v3": {
+        "queryByDefault": false,
+        "boostScore": 0.25,
+        "searchLabel": "glossaryTerms",
+        "degree": 1,
+        "mappings": [
+          { "type": "URN" }
+        ]
+      }
+    }
+  }
+  relatedTerms: optional array[GlossaryTermUrn]
+
 }

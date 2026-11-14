@@ -1,0 +1,42 @@
+namespace com.linkedin.common
+
+/**
+ * Siblings information of an entity.
+ */
+@Aspect = {
+  "name": "siblings",
+  "schemaVersion": 2
+}
+record Siblings {
+
+  /**
+   * List of sibling entities
+   */
+  @Relationship = {
+    "/*": {
+      "name": "SiblingOf",
+      "entityTypes": [ "dataset" ]
+    }
+  }
+  @Searchable = {
+    "/*": {
+      "fieldName": "siblings",
+      "fieldType": "URN",
+      "queryByDefault": false,
+      "hasValuesFieldName": "hasSiblings",
+      "addHasValuesToFilters": true,
+    }
+  }
+  siblings: array[Urn]
+
+  /**
+   * If this is the leader entity of the set of siblings
+   */
+  // No longer read by search, but kept: dropping a searchable field is a mapping change on V3
+  // entity indices under strict unknown-data handling and would trigger a reindex.
+  @Searchable = {
+    "fieldName": "siblingsPrimary",
+    "fieldType": "BOOLEAN"
+  }
+  primary: boolean
+}

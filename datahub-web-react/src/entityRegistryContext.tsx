@@ -1,4 +1,7 @@
 import React from 'react';
-import EntityRegistry from './app/entity/EntityRegistry';
 
-export const EntityRegistryContext = React.createContext(new EntityRegistry());
+import EntityRegistryV2 from '@app/entityV2/EntityRegistry';
+
+export type EntityRegistry = EntityRegistryV2;
+
+export const EntityRegistryContext = React.createContext<EntityRegistry>(new EntityRegistryV2());

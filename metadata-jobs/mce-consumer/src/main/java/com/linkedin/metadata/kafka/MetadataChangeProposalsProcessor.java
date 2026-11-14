@@ -1,91 +1,59 @@
 package com.linkedin.metadata.kafka;
 
-import com.codahale.metrics.Histogram;
-import com.codahale.metrics.MetricRegistry;
-import com.linkedin.entity.client.AspectClient;
-import com.linkedin.metadata.Constants;
-import com.linkedin.metadata.EventUtils;
+import static com.linkedin.mxe.ConsumerGroups.MCP_CONSUMER_GROUP_ID_VALUE;
+
+import com.linkedin.gms.factory.config.ConfigurationProvider;
+import com.linkedin.gms.factory.entityclient.RestliEntityClientFactory;
+import com.linkedin.metadata.dao.throttle.ThrottleSensor;
 import com.linkedin.metadata.kafka.config.MetadataChangeProposalProcessorCondition;
-import com.linkedin.metadata.utils.metrics.MetricUtils;
-import com.linkedin.mxe.FailedMetadataChangeProposal;
-import com.linkedin.mxe.MetadataChangeProposal;
-import com.linkedin.mxe.Topics;
-import java.io.IOException;
-import javax.annotation.Nonnull;
+import com.linkedin.metadata.kafka.pause.ConsumerPauseSupport;
+import com.linkedin.metadata.kafka.util.KafkaListenerUtil;
+import jakarta.annotation.PostConstruct;
+import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Conditional;
-import org.springframework.kafka.annotation.EnableKafka;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.context.annotation.Import;
 import org.springframework.stereotype.Component;
 
-
+/**
+ * Kafka transport entrypoint for single MCP processing via {@link MetadataChangeProposalConsumer}.
+ *
+ * <p>Wraps the Kafka {@link ConsumerRecord} in a transport-neutral {@link InboundMetadataEnvelope}
+ * before handing it to the shared processor.
+ *
+ * <p>Follow-up: align remaining split-path processors on {@link InboundMetadataEnvelope} (see PE
+ * consumer for the pattern).
+ */
 @Slf4j
 @Component
+@Import({RestliEntityClientFactory.class})
 @Conditional(MetadataChangeProposalProcessorCondition.class)
-@EnableKafka
+@RequiredArgsConstructor
 public class MetadataChangeProposalsProcessor {
 
-  private AspectClient aspectClient;
-  private KafkaTemplate<String, GenericRecord> kafkaTemplate;
+  @Qualifier("kafkaThrottle")
+  private final ThrottleSensor kafkaThrottle;
 
-  private final Histogram kafkaLagStats =
-      MetricUtils.get().histogram(MetricRegistry.name(this.getClass(), "kafkaLag"));
+  private final ConfigurationProvider provider;
+  private final ConsumerPauseSupport consumerPauseSupport;
+  private final MetadataChangeProposalConsumer metadataChangeProposalConsumer;
 
-  @Value("${FAILED_METADATA_CHANGE_PROPOSAL_TOPIC_NAME:" + Topics.FAILED_METADATA_CHANGE_PROPOSAL + "}")
-  private String fmcpTopicName;
+  @Value(MCP_CONSUMER_GROUP_ID_VALUE)
+  private String mceConsumerGroupId;
 
-  public MetadataChangeProposalsProcessor(
-      @Nonnull final AspectClient aspectClient,
-      @Nonnull final KafkaTemplate<String, GenericRecord> kafkaTemplate) {
-    this.aspectClient = aspectClient;
-    this.kafkaTemplate = kafkaTemplate;
+  @PostConstruct
+  public void registerConsumerThrottle() {
+    KafkaListenerUtil.registerThrottle(
+        kafkaThrottle, provider, consumerPauseSupport, mceConsumerGroupId);
   }
 
-  @KafkaListener(id = "${METADATA_CHANGE_PROPOSAL_KAFKA_CONSUMER_GROUP_ID:generic-mce-consumer-job-client}", topics =
-      "${METADATA_CHANGE_PROPOSAL_TOPIC_NAME:" + Topics.METADATA_CHANGE_PROPOSAL
-          + "}", containerFactory = "mceKafkaContainerFactory")
+  /** Used by {@link MetadataChangeProposalsKafkaListener} and tests. */
   public void consume(final ConsumerRecord<String, GenericRecord> consumerRecord) {
-    kafkaLagStats.update(System.currentTimeMillis() - consumerRecord.timestamp());
-    final GenericRecord record = consumerRecord.value();
-    log.debug("Record {}", record);
-
-    MetadataChangeProposal event = new MetadataChangeProposal();
-    try {
-      event = EventUtils.avroToPegasusMCP(record);
-      log.debug("MetadataChangeProposal {}", event);
-      // TODO: Get this from the event itself.
-      aspectClient.ingestProposal(event, Constants.SYSTEM_ACTOR);
-    } catch (Throwable throwable) {
-      log.error("MCP Processor Error", throwable);
-      log.error("Message: {}", record);
-      sendFailedMCP(event, throwable);
-    }
-  }
-
-  private void sendFailedMCP(@Nonnull MetadataChangeProposal event, @Nonnull Throwable throwable) {
-    final FailedMetadataChangeProposal failedMetadataChangeProposal = createFailedMCPEvent(event, throwable);
-    try {
-      final GenericRecord genericFailedMCERecord = EventUtils.pegasusToAvroFailedMCP(failedMetadataChangeProposal);
-      log.debug("Sending FailedMessages to topic - {}", fmcpTopicName);
-      log.info("Error while processing FMCP: FailedMetadataChangeProposal - {}", failedMetadataChangeProposal);
-      this.kafkaTemplate.send(fmcpTopicName, genericFailedMCERecord);
-    } catch (IOException e) {
-      log.error("Error while sending FailedMetadataChangeProposal: Exception  - {}, FailedMetadataChangeProposal - {}",
-          e.getStackTrace(), failedMetadataChangeProposal);
-    }
-  }
-
-  @Nonnull
-  private FailedMetadataChangeProposal createFailedMCPEvent(@Nonnull MetadataChangeProposal event,
-      @Nonnull Throwable throwable) {
-    final FailedMetadataChangeProposal fmcp = new FailedMetadataChangeProposal();
-    fmcp.setError(ExceptionUtils.getStackTrace(throwable));
-    fmcp.setMetadataChangeProposal(event);
-    return fmcp;
+    metadataChangeProposalConsumer.accept(
+        InboundMetadataEnvelope.fromKafka(consumerRecord, mceConsumerGroupId), mceConsumerGroupId);
   }
 }

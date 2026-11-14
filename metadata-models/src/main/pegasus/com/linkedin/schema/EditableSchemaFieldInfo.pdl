@@ -18,31 +18,101 @@ record EditableSchemaFieldInfo {
   @Searchable = {
     "fieldName": "editedFieldDescriptions",
     "fieldType": "TEXT",
-    "boostScore": 0.1
+    "boostScore": 1.0,
+    "sanitizeRichText": true,
+    "hasValuesFieldName": "hasDescription",
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
   }
   description: optional string
 
   /**
    * Tags associated with the field
    */
+  @Relationship = {
+    "/tags/*/tag": {
+      "name": "EditableSchemaFieldTaggedWith",
+        "entityTypes": [ "tag" ]
+    }
+  }
   @Searchable = {
     "/tags/*/tag": {
       "fieldName": "editedFieldTags",
-      "fieldType": "URN_PARTIAL",
-      "boostScore": 0.5
-    }
+      "fieldType": "URN",
+      "boostScore": 0.5,
+      "hasValuesFieldName": "hasTags",
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "tags",
+        "mappings": [
+          { "type": "URN" }
+        ]
+      }
+    },
+    "/tags/*/attribution/time": {
+        "fieldName": "editedFieldTagAttributionDates",
+        "fieldType": "DATETIME"
+      },
+    "/tags/*/attribution/actor": {
+        "fieldName": "editedFieldTagAttributionActors",
+        "fieldType": "URN",
+        "queryByDefault": false,
+      },
+    "/tags/*/attribution/source": {
+        "fieldName": "editedFieldTagAttributionSources",
+        "fieldType": "URN",
+        "queryByDefault": false,
+      },
   }
   globalTags: optional GlobalTags
 
   /**
    * Glossary terms associated with the field
    */
+   @Relationship = {
+      "/terms/*/urn": {
+        "name": "EditableSchemaFieldWithGlossaryTerm",
+        "entityTypes": [ "glossaryTerm" ]
+     }
+   }
    @Searchable = {
     "/terms/*/urn": {
       "fieldName": "editedFieldGlossaryTerms",
-      "fieldType": "URN_PARTIAL",
-      "boostScore": 0.5
-    }
+      "fieldType": "URN",
+      "boostScore": 0.5,
+      "includeSystemModifiedAt": true,
+      "systemModifiedAtFieldName": "schemaFieldTermsModifiedAt",
+      "hasValuesFieldName": "hasGlossaryTerms",
+      "v3": {
+        "queryByDefault": true,
+        "includeSystemModifiedAt": false,
+        "searchLabel": "glossaryTerms",
+        "mappings": [
+          { "type": "URN" }
+        ]
+      }
+    },
+    "/terms/*/attribution/time": {
+        "fieldName": "editedFieldTermAttributionDates",
+        "fieldType": "DATETIME"
+      },
+    "/terms/*/attribution/actor": {
+        "fieldName": "editedFieldTermAttributionActors",
+        "fieldType": "URN",
+        "queryByDefault": false,
+      },
+    "/terms/*/attribution/source": {
+        "fieldName": "editedFieldTermAttributionSources",
+        "fieldType": "URN",
+        "queryByDefault": false,
+      },
   }
   glossaryTerms: optional GlossaryTerms
 }

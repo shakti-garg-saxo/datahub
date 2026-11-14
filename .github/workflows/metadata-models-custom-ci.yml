@@ -1,0 +1,69 @@
+name: Metadata Models Custom CI
+
+on:
+  pull_request:
+    paths:
+      - "metadata-models-custom/**"
+      - ".github/workflows/metadata-models-custom-ci.yml"
+  push:
+    branches:
+      - master
+    paths:
+      - "metadata-models-custom/**"
+      - ".github/workflows/metadata-models-custom-ci.yml"
+
+jobs:
+  test-model-deploy:
+    # Depot for internal runs (remote Gradle build cache via DEPOT_CACHE_TOKEN);
+    # fork PRs stay GitHub-hosted. Non-PR events have no pull_request, so the
+    # fork check is false there.
+    runs-on: ${{ vars.DEPOT_PROJECT_ID != '' && !github.event.pull_request.head.repo.fork && 'depot-ubuntu-24.04' || 'ubuntu-24.04' }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up toolchain
+        uses: ./.github/actions/setup-toolchain
+        with:
+          python: false
+
+      - name: Build metadata-models-custom
+        run: |
+          cd metadata-models-custom
+          ../gradlew build -PprojVersion=0.0.1-ci-test
+
+      - name: Test modelDeploy command (from README)
+        run: |
+          cd metadata-models-custom
+          # This is the command documented in the README - it should work!
+          ../gradlew :metadata-models-custom:modelDeploy -PprojVersion=0.0.1-ci-test
+
+      - name: Verify deployment artifacts
+        run: |
+          # Check that files were deployed to the expected location
+          REGISTRY_ID="mycompany-dq-model"
+          VERSION="0.0.1-ci-test"
+          DEPLOY_DIR="$HOME/.datahub/plugins/models/$REGISTRY_ID/$VERSION"
+
+          echo "Checking deployment directory: $DEPLOY_DIR"
+
+          # Verify entity-registry.yaml exists
+          if [ ! -f "$DEPLOY_DIR/entity-registry.yaml" ]; then
+            echo "ERROR: entity-registry.yaml not found in $DEPLOY_DIR"
+            exit 1
+          fi
+
+          # Verify jar file exists
+          if [ ! -f "$DEPLOY_DIR/libs/metadata-models-custom-$VERSION.jar" ]; then
+            echo "ERROR: JAR file not found in $DEPLOY_DIR/libs/"
+            exit 1
+          fi
+
+          echo "✅ All deployment artifacts verified successfully!"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Clean up the deployed artifacts
+          rm -rf ~/.datahub/plugins/models/mycompany-dq-model

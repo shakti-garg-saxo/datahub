@@ -5,14 +5,14 @@ import com.linkedin.data.template.RecordTemplate;
 import javax.annotation.Nonnull;
 import org.apache.avro.specific.SpecificRecord;
 
-
 /**
  * Default implementation of a {@link TopicConvention}, which is fully customizable for event names.
  *
- * <p>The newer aspect-entity specific event names are based on a pattern that can also be configured. The pattern is a
- * string, which can use {@link #EVENT_TYPE_PLACEHOLDER}, {@link #VERSION_PLACEHOLDER}, {@link #ENTITY_PLACEHOLDER}, and
- * {@link #ASPECT_PLACEHOLDER} as placeholders for the event type (MCE, MAE, FMCE, etc), event version, entity name,
- * and aspect name, respectively.
+ * <p>The newer aspect-entity specific event names are based on a pattern that can also be
+ * configured. The pattern is a string, which can use {@link #EVENT_TYPE_PLACEHOLDER}, {@link
+ * #VERSION_PLACEHOLDER}, {@link #ENTITY_PLACEHOLDER}, and {@link #ASPECT_PLACEHOLDER} as
+ * placeholders for the event type (MCE, MAE, FMCE, etc), event version, entity name, and aspect
+ * name, respectively.
  */
 public final class TopicConventionImpl implements TopicConvention {
   // Placeholders
@@ -39,14 +39,22 @@ public final class TopicConventionImpl implements TopicConvention {
   private final String _metadataChangeLogVersionedTopicName;
   private final String _metadataChangeLogTimeseriesTopicName;
   private final String _failedMetadataChangeProposalTopicName;
-
+  private final String _platformEventTopicName;
+  private final String _dataHubUsageEventTopicName;
   // v5 patterns
   private final String _eventPattern;
 
-  public TopicConventionImpl(@Nonnull String metadataChangeEventTopicName, @Nonnull String metadataAuditEventTopicName,
-      @Nonnull String failedMetadataChangeEventTopicName, @Nonnull String metadataChangeProposalTopicName,
-      @Nonnull String metadataChangeLogVersionedTopicName, @Nonnull String metadataChangeLogTimeseriesTopicName,
-      @Nonnull String failedMetadataChangeProposalTopicName, @Nonnull String eventPattern) {
+  public TopicConventionImpl(
+      @Nonnull String metadataChangeEventTopicName,
+      @Nonnull String metadataAuditEventTopicName,
+      @Nonnull String failedMetadataChangeEventTopicName,
+      @Nonnull String metadataChangeProposalTopicName,
+      @Nonnull String metadataChangeLogVersionedTopicName,
+      @Nonnull String metadataChangeLogTimeseriesTopicName,
+      @Nonnull String failedMetadataChangeProposalTopicName,
+      @Nonnull String platformEventTopicName,
+      @Nonnull String eventPattern,
+      @Nonnull String dataHubUsageEventTopicName) {
     _metadataChangeEventTopicName = metadataChangeEventTopicName;
     _metadataAuditEventTopicName = metadataAuditEventTopicName;
     _failedMetadataChangeEventTopicName = failedMetadataChangeEventTopicName;
@@ -54,13 +62,23 @@ public final class TopicConventionImpl implements TopicConvention {
     _metadataChangeLogVersionedTopicName = metadataChangeLogVersionedTopicName;
     _metadataChangeLogTimeseriesTopicName = metadataChangeLogTimeseriesTopicName;
     _failedMetadataChangeProposalTopicName = failedMetadataChangeProposalTopicName;
+    _platformEventTopicName = platformEventTopicName;
     _eventPattern = eventPattern;
+    _dataHubUsageEventTopicName = dataHubUsageEventTopicName;
   }
 
   public TopicConventionImpl() {
-    this(Topics.METADATA_CHANGE_EVENT, Topics.METADATA_AUDIT_EVENT, Topics.FAILED_METADATA_CHANGE_EVENT,
-        Topics.METADATA_CHANGE_PROPOSAL, Topics.METADATA_CHANGE_LOG_VERSIONED, Topics.METADATA_CHANGE_LOG_TIMESERIES,
-        Topics.FAILED_METADATA_CHANGE_PROPOSAL, DEFAULT_EVENT_PATTERN);
+    this(
+        Topics.METADATA_CHANGE_EVENT,
+        Topics.METADATA_AUDIT_EVENT,
+        Topics.FAILED_METADATA_CHANGE_EVENT,
+        Topics.METADATA_CHANGE_PROPOSAL,
+        Topics.METADATA_CHANGE_LOG_VERSIONED,
+        Topics.METADATA_CHANGE_LOG_TIMESERIES,
+        Topics.FAILED_METADATA_CHANGE_PROPOSAL,
+        Topics.PLATFORM_EVENT,
+        DEFAULT_EVENT_PATTERN,
+        Topics.DATAHUB_USAGE_EVENT);
   }
 
   @Nonnull
@@ -106,15 +124,32 @@ public final class TopicConventionImpl implements TopicConvention {
   }
 
   @Nonnull
-  private String buildEventName(@Nonnull String eventType, @Nonnull String entityName, @Nonnull String aspectName,
+  @Override
+  public String getPlatformEventTopicName() {
+    return _platformEventTopicName;
+  }
+
+  @Nonnull
+  @Override
+  public String getDataHubUsageEventTopicName() {
+    return _dataHubUsageEventTopicName;
+  }
+
+  @Nonnull
+  private String buildEventName(
+      @Nonnull String eventType,
+      @Nonnull String entityName,
+      @Nonnull String aspectName,
       int version) {
-    return _eventPattern.replace(EVENT_TYPE_PLACEHOLDER, eventType)
+    return _eventPattern
+        .replace(EVENT_TYPE_PLACEHOLDER, eventType)
         .replace(ENTITY_PLACEHOLDER, entityName)
         .replace(ASPECT_PLACEHOLDER, aspectName)
         .replace(VERSION_PLACEHOLDER, Integer.toString(version));
   }
 
-  private String buildEventName(@Nonnull String eventType, @Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
+  private String buildEventName(
+      @Nonnull String eventType, @Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
     final String urnName = urn.getClass().getSimpleName();
     // Expect URN name to relate to the entity name. (EntityName) + "Urn" == (UrnName)
     final String entityType = urnName.substring(0, urnName.length() - "Urn".length());
@@ -131,7 +166,8 @@ public final class TopicConventionImpl implements TopicConvention {
   }
 
   @Override
-  public Class<? extends SpecificRecord> getMetadataChangeEventType(@Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
+  public Class<? extends SpecificRecord> getMetadataChangeEventType(
+      @Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
     // v5 is still in development.
     throw new UnsupportedOperationException("TODO - implement once versions are in annotations.");
   }
@@ -143,20 +179,22 @@ public final class TopicConventionImpl implements TopicConvention {
   }
 
   @Override
-  public Class<? extends SpecificRecord> getMetadataAuditEventType(@Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
+  public Class<? extends SpecificRecord> getMetadataAuditEventType(
+      @Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
     // v5 is still in development.
     throw new UnsupportedOperationException("TODO - implement once versions are in annotations.");
   }
 
   @Nonnull
   @Override
-  public String getFailedMetadataChangeEventTopicName(@Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
+  public String getFailedMetadataChangeEventTopicName(
+      @Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
     return buildEventName(FAILED_METADATA_CHANGE_EVENT_TYPE, urn, aspect);
   }
 
   @Override
-  public Class<? extends SpecificRecord> getFailedMetadataChangeEventType(@Nonnull Urn urn,
-      @Nonnull RecordTemplate aspect) {
+  public Class<? extends SpecificRecord> getFailedMetadataChangeEventType(
+      @Nonnull Urn urn, @Nonnull RecordTemplate aspect) {
     // v5 is still in development.
     throw new UnsupportedOperationException("TODO - implement once versions are in annotations.");
   }

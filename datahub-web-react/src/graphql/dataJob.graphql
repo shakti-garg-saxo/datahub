@@ -1,56 +1,36 @@
 query getDataJob($urn: String!) {
     dataJob(urn: $urn) {
+        urn
+        type
         ...dataJobFields
-        downstreamLineage {
-            ...downstreamRelationshipFields
+        privileges {
+            ...entityPrivileges
         }
-        upstreamLineage {
-            ...upstreamRelationshipFields
-        }
-        parentFlow: relationships(input: { types: ["IsPartOf"], direction: OUTGOING, start: 0, count: 1 }) {
-            start
+        runs(start: 0, count: 20) {
             count
+            start
             total
-            relationships {
-                entity {
-                    ... on DataFlow {
-                        urn
-                        type
-                        orchestrator
-                        flowId
-                        cluster
-                        info {
-                            name
-                            description
-                            project
-                        }
-                        ownership {
-                            ...ownershipFields
-                        }
-                        globalTags {
-                            ...globalTagsFields
-                        }
-                        glossaryTerms {
-                            ...glossaryTerms
-                        }
-                        editableProperties {
-                            description
-                        }
-                    }
-                }
+        }
+        autoRenderAspects: aspects(input: { autoRenderOnly: true }) {
+            ...autoRenderAspectFields
+        }
+        structuredProperties {
+            properties {
+                ...structuredPropertiesFields
             }
+        }
+        browsePathV2 {
+            ...browsePathV2Fields
+        }
+        ...notes
+        platform {
+            ...platformFields
         }
     }
 }
 
 mutation updateDataJob($urn: String!, $input: DataJobUpdateInput!) {
     updateDataJob(urn: $urn, input: $input) {
-        ...dataJobFields
-        downstreamLineage {
-            ...downstreamRelationshipFields
-        }
-        upstreamLineage {
-            ...upstreamRelationshipFields
-        }
+        urn
     }
 }

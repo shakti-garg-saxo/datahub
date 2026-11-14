@@ -1,0 +1,27 @@
+namespace com.linkedin.metadata.key
+
+/**
+ * Key for a Connection
+ */
+@Aspect = {
+  "name": "dataHubConnectionKey"
+}
+record DataHubConnectionKey {
+  /**
+  * A unique identifier for the connection.
+  */
+  @Searchable = {
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "id",
+      "boostScore": 2.0,
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  id: string
+}

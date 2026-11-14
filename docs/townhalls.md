@@ -1,23 +1,78 @@
 # DataHub Town Halls
 
-We hold regular virtual town hall meetings to meet with DataHub community. 
-Currently it's held on the fourth Friday of every month (with some exceptions such as holiday weekends).
-It's the perfect venue to meet the team behind DataHub and other users, as well as to ask higher-level questions, such as roadmap and product direction.
-From time to time we also use the opportunity to showcase upcoming features.
+Join us for community gatherings where we discuss roadmap updates, demo new features, and hear from DataHub users around the world.
 
-## Coming up - Sep 24th, 2021 @ 9 AM US Pacific
+## 🗓️ Next Town Hall
 
-## Meeting Invite
+Town Halls run monthly. [Register on our events calendar →](https://luma.com/datahubevents?tag=datahub%20town%20hall)
 
-You can join with this link https://zoom.datahubproject.io, or [signup](https://docs.google.com/forms/d/1r9bObXKS3tgKpISqqO3rw4yQog5zwuaFxg8IrJGUbvQ/) to get a calendar invite. 
+---
 
-- Topic Proposals: [submit here](https://docs.google.com/forms/d/1v2ynbAXjJlqY97xE_X1DAntNrXDznOFiNfryUkMPtkI/)
-- Signup to get an invite: [here](https://docs.google.com/forms/d/1r9bObXKS3tgKpISqqO3rw4yQog5zwuaFxg8IrJGUbvQ/)
+## 📺 Recent Town Halls
 
-## Agenda
+**July 2026: Real Stories in Production feat. Miro & Just Eat Takeaway**
 
-- Stay Tuned!
+- 📺 [Watch recording](https://youtu.be/B5cV9ZPgg30)
 
-## Past Meetings
+**June 2026: Inside the Context Platform feat. TiDB / PingCAP**
 
-See [Town Hall History](townhall-history.md) for recordings of past town halls.
+- 📺 [Watch recording](https://www.youtube.com/watch?v=JboXwGIz54k)
+
+**May 2026: Context to Action with Grab, dltHub, and iFood**
+
+- 📺 [Watch recording](https://youtu.be/GsnX7edN6Rw)
+
+**April 2026: Talk to Data – The Context Edition feat. Pinterest, Omni and DataHub**
+
+- 📺 [Watch recording](https://youtu.be/qqFUewpnGYg)
+
+**March 2026: Agents, Apps & the Art of Extension**
+
+- 📺 [Watch recording](https://www.youtube.com/watch?v=MAyldt2n3R8)
+
+**February 2026: Lineage in Action: Extending Reach, Enriching Context**
+
+- 📺 [Watch recording](https://www.youtube.com/watch?v=vXJd2ho0i-o)
+
+**January 2026: Powering AI Agents with DataHub Context**
+
+- 📺 [Watch recording](https://youtu.be/dqZNV09yvA0)
+
+**December 2025: Building AI Agents You'd Trust in Production**
+
+- 📺 [Watch recording](https://www.youtube.com/watch?v=oWiT7tkSZgo)
+
+**[→ View all Town Hall recordings](https://www.youtube.com/playlist?list=PLdCtLs64vZvHTXGqybmOfyxXbGDn2Reb9)**
+
+---
+
+## 💡 What We Typically Cover
+
+- **Product Roadmap Updates** - What's coming next in DataHub
+- **Feature Demos** - Live walkthroughs of new capabilities
+- **Community Case Studies** - How teams are using DataHub in production
+- **Open Q&A** - Ask the team anything
+
+## 🙋 Want to Participate?
+
+- **Ask Questions:** Submit topics via [Slack #townhall channel](https://datahub.com/slack)
+- **Share Your Story:** Using DataHub at your company? We'd love to feature you - reach out in Slack
+- **Suggest Topics:** Drop ideas in the #townhall channel
+
+---
+
+## 📅 Upcoming Community Events
+
+Check out our DataHub Community Calendar to RSVP to office hours and upcoming events!
+
+<p align="center">
+  <iframe
+    src="https://lu.ma/embed/calendar/cal-lom9HnTVnZkKsNh/events"
+    width="80%"
+    height="450"
+    frameborder="0"
+    allowfullscreen=""
+    aria-hidden="false"
+    tabindex="0"
+  ></iframe>
+</p>

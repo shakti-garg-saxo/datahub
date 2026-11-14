@@ -10,7 +10,7 @@ import com.linkedin.events.metadata.ChangeType
 record MetadataChangeProposal {
 
   /**
-   * Kafka audit header. See go/kafkaauditheader for more info.
+   * Kafka audit header. Currently remains unused in the open source.
    */
   auditHeader: optional KafkaAuditHeader
 
@@ -37,15 +37,22 @@ record MetadataChangeProposal {
   /**
    * Aspect of the entity being written to
    * Not filling this out implies that the writer wants to affect the entire entity
-   * Note: This is only valid for CREATE and DELETE operations.
+   * Note: This is only valid for CREATE, UPSERT, and DELETE operations.
    **/
   aspectName: optional string
 
+  /**
+   * The value of the new aspect.
+   */
   aspect: optional GenericAspect
 
   /**
-   * A string->string map of custom properties that one might want to attach to an event
+   * System properties that one might want to attach to an event
    **/
   systemMetadata: optional SystemMetadata
 
+  /**
+  * Headers - intended to mimic http headers
+  */
+  headers: optional map[string, string]
 }

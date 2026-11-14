@@ -1,7 +1,7 @@
 plugins {
-    id 'java'
+    id 'java-library'
 }
-
+apply from: '../../gradle/coverage/java-coverage.gradle'
 apply plugin: 'pegasus'
 
 configurations {
@@ -11,33 +11,56 @@ configurations {
 dependencies {
     avro project(path: ':metadata-models', configuration: 'avroSchema')
 
-    compile project(':li-utils')
-    compile (project(':metadata-service:factories')) {
+    implementation project(':li-utils')
+    implementation(project(':metadata-service:factories')) {
         exclude group: 'org.neo4j.test'
     }
-    compile project(':metadata-service:restli-client')
-    compile project(':metadata-utils')
-    compile project(":entity-registry")
-    compile project(':metadata-builders')
-    compile project(':metadata-events:mxe-schemas')
-    compile project(':metadata-events:mxe-avro-1.7')
-    compile project(':metadata-events:mxe-registration')
-    compile project(':metadata-events:mxe-utils-avro-1.7')
+    implementation project(':metadata-service:auth-config')
+    implementation project(':metadata-service:restli-client-api')
+    implementation project(':metadata-io')
+    implementation project(':ingestion-scheduler')
+    implementation project(':metadata-utils')
+    implementation project(":entity-registry")
+    implementation project(':metadata-events:mxe-avro')
+    implementation project(':metadata-events:mxe-registration')
+    implementation project(':metadata-events:mxe-utils-avro')
+    implementation project(':datahub-graphql-core')
+    api project(':metadata-jobs:common')
 
-    compile externalDependency.elasticSearchRest
-    compile externalDependency.gmaDaoApi
-    compile externalDependency.gmaNeo4jDao
-    compile externalDependency.kafkaAvroSerde
-    compile externalDependency.neo4jJavaDriver
+    implementation externalDependency.elasticSearchRest
+    implementation externalDependency.kafkaAvroSerde
+    implementation externalDependency.protobuf
+    implementation externalDependency.neo4jJavaDriver
 
-    compile externalDependency.springKafka
-    compile externalDependency.springActuator
+    implementation externalDependency.springKafka
+    implementation externalDependency.annotationApi
+    implementation externalDependency.opentelemetrySdkTrace
+    implementation externalDependency.opentelemetrySdkMetrics
 
+    implementation externalDependency.slf4jApi
     compileOnly externalDependency.lombok
 
     annotationProcessor externalDependency.lombok
 
-    runtime externalDependency.logbackClassic
+    runtimeOnly externalDependency.logbackClassic
+
+    // Spring Boot 4.0: Cassandra/Elasticsearch auto-configs moved to separate modules (needed for tests)
+    testImplementation testFixtures(project(':metadata-utils'))
+    testImplementation externalDependency.springBootCassandra
+    testImplementation externalDependency.springBootElasticsearch
+    // Spring Boot 4.0: Jackson 2 bridge — provides ObjectMapper bean via Jackson2AutoConfiguration
+    testImplementation externalDependency.springBootJackson2
+    testImplementation externalDependency.mockito
+    testImplementation(testFixtures(project(":metadata-io")))
+    implementation externalDependency.awsMskIamAuth
+    implementation externalDependency.azureIdentityExtensions
+    implementation externalDependency.azureIdentity
+    // kafka-clients OAUTHBEARER JWT validation is compileOnly upstream (KAFKA-20184)
+    runtimeOnly externalDependency.jose4j
+
+    testImplementation externalDependency.testng
+    testImplementation externalDependency.springBootTest
+    testRuntimeOnly externalDependency.logbackClassic
 }
 
 task avroSchemaSources(type: Copy) {
@@ -51,7 +74,8 @@ task avroSchemaSources(type: Copy) {
 }
 
 compileJava.dependsOn avroSchemaSources
+processResources.dependsOn avroSchemaSources
 
 clean {
-    project.delete("src/main/resources/avro")
+    delete "src/main/resources/avro"
 }

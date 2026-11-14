@@ -1,0 +1,36 @@
+import { Meta } from '@storybook/blocks';
+
+import { PHOSPHOR_ICONS } from '@components/components/Icon/constants';
+
+import { IconGalleryWithSearch } from './mdx-components';
+
+<Meta title="Icons" />
+
+<div className="custom-docs">
+	## Icons
+
+    We use the [Phosphor](https://phosphoricons.com) icon library, rendered through our own `<Icon />` component so size, color, rotation, and tooltips work the same way everywhere.
+
+    <a href="/?path=/docs/media-icon--docs">
+    	View the component documentation to learn more
+    </a>
+
+    Pass the icon component itself to the `icon` prop. Import each icon from its own CSR path so only the icons you use end up in the bundle; importing from `@phosphor-icons/react` directly is blocked by ESLint.
+
+    ```tsx
+    import { Icon } from '@components';
+    import { ChartLine } from '@phosphor-icons/react/dist/csr/ChartLine';
+
+    <Icon icon={ChartLine} size="lg" weight="bold" />
+    ```
+
+    <br />
+
+    ### Gallery
+
+    There are {PHOSPHOR_ICONS.length} icons available. <br />
+    The name under each icon is both its export name and its import path: `@phosphor-icons/react/dist/csr/<Name>`.
+
+    <IconGalleryWithSearch icons={PHOSPHOR_ICONS} />
+
+</div>

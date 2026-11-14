@@ -1,0 +1,1175 @@
+import logging
+from dataclasses import dataclass, field
+from typing import (
+    TYPE_CHECKING,
+    Counter,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Type,
+    Union,
+)
+
+from pydantic import Field, PositiveInt, model_validator
+
+from datahub.configuration.common import AllowDenyPattern
+from datahub.configuration.source_common import DatasetSourceConfigMixin
+from datahub.emitter.mce_builder import (
+    make_data_platform_urn,
+    make_dataplatform_instance_urn,
+    make_dataset_urn_with_platform_instance,
+    make_domain_urn,
+    make_schema_field_urn,
+)
+from datahub.emitter.mcp import MetadataChangeProposalWrapper
+from datahub.emitter.mcp_builder import add_domain_to_entity_wu, add_tags_to_entity_wu
+from datahub.ingestion.api.common import PipelineContext
+from datahub.ingestion.api.decorators import (
+    SupportStatus,
+    capability,
+    config_class,
+    platform_name,
+    support_status,
+)
+from datahub.ingestion.api.source import SourceCapability
+from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.glossary.classification_mixin import (
+    ClassificationHandler,
+    ClassificationReportMixin,
+    ClassificationSourceConfigMixin,
+    classification_workunit_processor,
+)
+from datahub.ingestion.source.aws.aws_common import (
+    AwsSourceConfig,
+    make_dynamodb_dataset_name,
+)
+from datahub.ingestion.source.aws.s3_util import (
+    make_s3_urn_for_lineage,
+    strip_s3_prefix,
+)
+from datahub.ingestion.source.dynamodb.data_reader import DynamoDBTableItemsReader
+from datahub.ingestion.source.schema_inference.object import SchemaDescription
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalSourceReport,
+    StatefulIngestionConfigBase,
+    StatefulStaleMetadataRemovalConfig,
+)
+from datahub.ingestion.source.state.stateful_ingestion_base import (
+    StatefulIngestionSourceBase,
+)
+from datahub.metadata.schema_classes import (
+    ArrayTypeClass,
+    BooleanTypeClass,
+    BytesTypeClass,
+    DataPlatformInstanceClass,
+    DatasetLineageTypeClass,
+    DatasetPropertiesClass,
+    FineGrainedLineageClass,
+    FineGrainedLineageDownstreamTypeClass,
+    FineGrainedLineageUpstreamTypeClass,
+    NullTypeClass,
+    NumberTypeClass,
+    RecordTypeClass,
+    SchemaFieldClass as SchemaField,
+    SchemaFieldDataTypeClass as SchemaFieldDataType,
+    SchemalessClass,
+    SchemaMetadataClass,
+    StringTypeClass,
+    UnionTypeClass,
+    UpstreamClass,
+)
+from datahub.specific.dataset import DatasetPatchBuilder
+from datahub.utilities.lossy_collections import LossyList
+from datahub.utilities.registries.domain_registry import DomainRegistry
+from datahub.utilities.urns.field_paths import get_simple_field_path_from_v2_field_path
+
+PAGE_SIZE = 100
+MAX_PRIMARY_KEYS_SIZE = 100
+FIELD_DELIMITER = "."
+EXPORT_STATUS_COMPLETED = "COMPLETED"
+S3_URI_PREFIX = "s3://"
+# Hard cap on ListExports pagination so a shim/service returning a static NextToken can't hang
+# ingestion forever. 100 pages * default 25 summaries/page covers any realistic table.
+MAX_EXPORT_PAGES = 100
+
+logger: logging.Logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from mypy_boto3_dynamodb import DynamoDBClient
+    from mypy_boto3_dynamodb.type_defs import (
+        AttributeValueTypeDef,
+        TableDescriptionTypeDef,
+        TagTypeDef,
+    )
+
+
+class DynamoDBConfig(
+    DatasetSourceConfigMixin,
+    StatefulIngestionConfigBase,
+    ClassificationSourceConfigMixin,
+    AwsSourceConfig,
+):
+    domain: Dict[str, AllowDenyPattern] = Field(
+        default=dict(),
+        description="regex patterns for tables to filter to assign domain_key. ",
+    )
+
+    # This config option allows user to include a list of items from a table when we scan and construct the schema,
+    # the key of this dict is table name and the value is the list of item primary keys in dynamodb format,
+    # if the table use composite key then the value should have partition key and sort key present
+    include_table_item: Optional[Dict[str, List[Dict]]] = Field(
+        default=None,
+        description="[Advanced] The primary keys of items of a table in dynamodb format the user would like to include in schema. "
+        'Refer "Advanced Configurations" section for more details',
+    )
+
+    max_schema_size: PositiveInt = Field(
+        default=300, description="Maximum number of fields to include in the schema."
+    )
+
+    table_pattern: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="Regex patterns for tables to filter in ingestion. The table name format is 'region.table'",
+    )
+    schema_sampling_size: PositiveInt = Field(
+        default=100,
+        description="Number of items to sample from each table for schema inference. This controls how many items are scanned to determine the table's schema structure.",
+    )
+    extract_table_tags: bool = Field(
+        default=False,
+        description=(
+            "When enabled, tags associated with DynamoDB tables in AWS will be emitted as DataHub tags. "
+            "Tags are applied using OVERWRITE mode, meaning any existing tags including tags manually "
+            "added or modified from the UI will be replaced. Use with caution."
+        ),
+    )
+    include_s3_export_lineage: bool = Field(
+        default=False,
+        description=(
+            "When enabled, discovers existing DynamoDB Export to S3 jobs via ListExports/DescribeExport "
+            "and emits COPY lineage from each DynamoDB table to its S3 destination. "
+            "Does not start or manage exports — only reads export metadata, which AWS keeps for about 90 days. "
+            "Requires dynamodb:ListExports and dynamodb:DescribeExport."
+        ),
+    )
+    include_s3_export_column_lineage: bool = Field(
+        default=False,
+        description=(
+            "When `include_s3_export_lineage` is enabled, also emit column-level COPY lineage "
+            "inferred from the DynamoDB table's schema. With a DataHub connection and the S3 export "
+            "dataset already in DataHub, only fields that match its schema (case-insensitive) are "
+            "linked. Without a connection, or when the dataset has no schema in DataHub, the "
+            "DynamoDB field paths are used as-is. If the schema cannot be read, only table-level "
+            "lineage is emitted. Off by default: native Export to S3 writes "
+            "DynamoDB JSON/Ion, whose field paths often differ from the connector's flattened schema."
+        ),
+    )
+    max_exports_per_table: PositiveInt = Field(
+        default=50,
+        description=(
+            "When `include_s3_export_lineage` is enabled, the maximum number of completed exports "
+            "to describe per table. A table exported frequently accumulates many export ARNs over "
+            "the ~90-day retention window that nearly all resolve to the same destination; this "
+            "bounds the DescribeExport calls. Exports are described in the order ListExports "
+            "returns them; AWS does not document that ordering, so which exports are kept when a "
+            "table exceeds this limit is not guaranteed."
+        ),
+    )
+    s3_export_platform_instance: Optional[str] = Field(
+        default=None,
+        description=(
+            "When `include_s3_export_lineage` is enabled, the `platform_instance` to stamp on the "
+            "S3 export dataset URNs. Set this to match the `platform_instance` used by the S3 "
+            "source that ingests the export bucket, otherwise the lineage edges point at an S3 URN "
+            "that does not exist."
+        ),
+    )
+    # Custom Stateful Ingestion settings
+    stateful_ingestion: Optional[StatefulStaleMetadataRemovalConfig] = None
+
+    @property
+    def dynamodb_client(self):
+        return self.get_dynamodb_client()
+
+    @model_validator(mode="after")
+    def validate_s3_export_lineage_flags(self) -> "DynamoDBConfig":
+        # Warn, don't fail (as the snowflake/unity configs do): a dependent flag set while the
+        # parent feature is off is a silent no-op, so surface it.
+        if not self.include_s3_export_lineage:
+            if self.include_s3_export_column_lineage:
+                logger.warning(
+                    "include_s3_export_column_lineage=True has no effect unless "
+                    "include_s3_export_lineage is also enabled; ignoring it."
+                )
+            if self.s3_export_platform_instance:
+                logger.warning(
+                    "s3_export_platform_instance is set but include_s3_export_lineage is "
+                    "disabled; it will have no effect."
+                )
+            if "max_exports_per_table" in self.model_fields_set:
+                logger.warning(
+                    "max_exports_per_table is set but include_s3_export_lineage is disabled; "
+                    "it will have no effect."
+                )
+        return self
+
+
+@dataclass
+class DynamoDBSourceReport(StaleEntityRemovalSourceReport, ClassificationReportMixin):
+    filtered: LossyList[str] = field(default_factory=LossyList)
+    s3_export_locations_found: int = 0
+    s3_export_lineage_edges: int = 0
+    s3_export_column_lineage_resolved: int = 0
+    # Caveat counter, not a success metric: identity-mapped column edges emitted when the S3
+    # export dataset isn't in DataHub, so they're unvalidated against a real schema.
+    s3_export_column_lineage_inferred: int = 0
+    # Destinations with no ingested dataset (no datasetProperties) in DataHub, checked
+    # only when the recipe has a DataHub connection. Their lineage lands on an S3
+    # entity that only carries these edges.
+    s3_export_destinations_not_in_datahub: LossyList[str] = field(
+        default_factory=LossyList
+    )
+
+    def report_dropped(self, name: str) -> None:
+        self.filtered.append(name)
+
+
+# map attribute data types to native types
+_attribute_type_to_native_type_mapping: Dict[str, str] = {
+    "N": "Numbers",
+    "B": "Bytes",
+    "S": "String",
+    "M": "Map",
+    "L": "List",
+    "SS": "String List",
+    "NS": "Number List",
+    "BS": "Binary Set",
+    "NULL": "Null",
+    # if the attribute type is NULL the attribute value will be true or false.
+    "BOOL": "Boolean",
+    "mixed": "mixed",
+}
+# map DynamoDB attribute types to DataHub classes
+_attribute_type_to_field_type_mapping: Dict[str, Type] = {
+    "N": NumberTypeClass,
+    "B": BytesTypeClass,
+    "S": StringTypeClass,
+    "M": RecordTypeClass,
+    "L": ArrayTypeClass,
+    "SS": ArrayTypeClass,
+    "NS": ArrayTypeClass,
+    "BS": ArrayTypeClass,
+    "NULL": BooleanTypeClass,
+    "BOOL": BooleanTypeClass,
+    "mixed": UnionTypeClass,
+}
+
+
+@platform_name("DynamoDB", id="dynamodb")
+@config_class(DynamoDBConfig)
+@support_status(SupportStatus.GA)
+@capability(
+    SourceCapability.PLATFORM_INSTANCE,
+    "By default, platform_instance will use the AWS account id",
+)
+@capability(
+    SourceCapability.TAGS,
+    "Optionally enabled via `extract_table_tags` to extract dynamoDB table tags as DataHub tags",
+)
+@capability(
+    SourceCapability.LINEAGE_COARSE,
+    "Optionally enabled via `include_s3_export_lineage` for DynamoDB Export to S3 destinations",
+)
+@capability(
+    SourceCapability.LINEAGE_FINE,
+    "Optionally enabled via `include_s3_export_lineage` with `include_s3_export_column_lineage`",
+)
+class DynamoDBSource(StatefulIngestionSourceBase):
+    """
+    This plugin extracts the following:
+
+    AWS DynamoDB table names with their region, and infer schema of attribute names and types by scanning
+    the table
+
+    """
+
+    config: DynamoDBConfig
+    report: DynamoDBSourceReport
+    platform: str
+
+    def __init__(self, ctx: PipelineContext, config: DynamoDBConfig, platform: str):
+        super().__init__(config, ctx)
+        self.config = config
+        self.report = DynamoDBSourceReport()
+        self.platform = platform
+        self.classification_handler = ClassificationHandler(self.config, self.report)
+        # Aggregate so multiple tables that export to the same prefix emit one UpstreamLineage
+        # aspect per S3 URN. Keys are, in order: S3 export dataset URN -> DynamoDB upstream dataset
+        # URN -> that table's v2 field paths (empty unless column lineage is enabled). Plain dict
+        # (not defaultdict) so a read can never materialise an empty entry that would emit
+        # upstreams=[] and wipe a real S3 dataset's lineage.
+        self._s3_export_lineage: Dict[str, Dict[str, List[str]]] = {}
+
+        if self.config.domain:
+            self.domain_registry = DomainRegistry(
+                cached_domains=[domain_id for domain_id in self.config.domain],
+                graph=self.ctx.graph,
+            )
+
+    @classmethod
+    def create(cls, config_dict: dict, ctx: PipelineContext) -> "DynamoDBSource":
+        config = DynamoDBConfig.model_validate(config_dict)
+        return cls(ctx, config, "dynamodb")
+
+    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
+        dynamodb_client = self.config.dynamodb_client
+        region = dynamodb_client.meta.region_name
+
+        data_reader = DynamoDBTableItemsReader.create(dynamodb_client)
+
+        for table_name in self._list_tables(dynamodb_client):
+            dataset_name = make_dynamodb_dataset_name(region, table_name)
+            if not self.config.table_pattern.allowed(dataset_name):
+                logger.debug(f"skipping table: {dataset_name}")
+                self.report.report_dropped(dataset_name)
+                continue
+
+            table_wu_generator = self._process_table(
+                region, dynamodb_client, table_name, dataset_name
+            )
+            yield from classification_workunit_processor(
+                table_wu_generator,
+                self.classification_handler,
+                data_reader,
+                [region, table_name],
+            )
+
+        yield from self._emit_s3_export_lineage()
+
+    def _process_table(
+        self,
+        region: str,
+        dynamodb_client: "DynamoDBClient",
+        table_name: str,
+        dataset_name: str,
+    ) -> Iterable[MetadataWorkUnit]:
+        logger.debug(f"Processing table: {dataset_name}")
+        table_info = dynamodb_client.describe_table(TableName=table_name)["Table"]
+        account_id = table_info["TableArn"].split(":")[4]
+        platform_instance = self.config.platform_instance or account_id
+        dataset_urn = make_dataset_urn_with_platform_instance(
+            platform=self.platform,
+            platform_instance=platform_instance,
+            name=dataset_name,
+            env=self.config.env,
+        )
+        dataset_properties = DatasetPropertiesClass(
+            name=table_name,
+            tags=[],
+            customProperties={
+                "table.arn": table_info["TableArn"],
+                "table.totalItems": str(table_info["ItemCount"]),
+            },
+        )
+
+        primary_key_dict = self.extract_primary_key_from_key_schema(table_info)
+        table_schema = self.construct_schema_from_dynamodb(
+            dynamodb_client, region, table_name
+        )
+
+        schema_metadata = self.construct_schema_metadata(
+            table_name,
+            dataset_urn,
+            dataset_properties,
+            table_schema,
+            primary_key_dict,
+        )
+
+        yield MetadataChangeProposalWrapper(
+            entityUrn=dataset_urn,
+            aspect=schema_metadata,
+        ).as_workunit()
+
+        yield MetadataChangeProposalWrapper(
+            entityUrn=dataset_urn,
+            aspect=dataset_properties,
+        ).as_workunit()
+
+        # Add AWS resource tags if enabled
+        if self.config.extract_table_tags:
+            table_arn = table_info.get("TableArn")
+            if table_arn:
+                yield from self._get_dynamodb_table_tags_wu(
+                    dynamodb_client=dynamodb_client,
+                    table_arn=table_arn,
+                    dataset_urn=dataset_urn,
+                )
+
+        yield from self._get_domain_wu(
+            dataset_name=table_name,
+            entity_urn=dataset_urn,
+        )
+
+        platform_instance_aspect = DataPlatformInstanceClass(
+            platform=make_data_platform_urn(self.platform),
+            instance=make_dataplatform_instance_urn(self.platform, platform_instance),
+        )
+
+        yield MetadataChangeProposalWrapper(
+            entityUrn=dataset_urn,
+            aspect=platform_instance_aspect,
+        ).as_workunit()
+
+        if self.config.include_s3_export_lineage:
+            self._collect_s3_export_lineage(
+                dynamodb_client=dynamodb_client,
+                table_arn=table_info["TableArn"],
+                dataset_urn=dataset_urn,
+                dataset_name=dataset_name,
+                field_paths=[field.fieldPath for field in schema_metadata.fields],
+            )
+
+    def _list_tables(
+        self,
+        dynamodb_client: "DynamoDBClient",
+    ) -> Iterable[str]:
+        # https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/dynamodb/paginator/ListTables.html
+        try:
+            for page in dynamodb_client.get_paginator("list_tables").paginate():
+                table_names = page.get("TableNames")
+                if table_names:
+                    yield from table_names
+        except Exception as ex:
+            # TODO: If regions is config input then this would be self.report.report_warning,
+            # we can create dynamodb client to take aws region or regions as user input
+            logger.info(f"Exception happened while listing tables, skipping: {ex}")
+
+    def construct_schema_from_dynamodb(
+        self,
+        dynamodb_client: "DynamoDBClient",
+        region: str,
+        table_name: str,
+    ) -> Dict[Tuple[str, ...], SchemaDescription]:
+        """
+        This will use the dynamodb client to scan the given table to retrieve items with pagination,
+        and construct the schema of this table by reading the attributes of the retrieved items
+        """
+        paginator = dynamodb_client.get_paginator("scan")
+        schema: Dict[Tuple[str, ...], SchemaDescription] = {}
+        """
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/dynamodb.html#DynamoDB.Paginator.Scan
+        Note that the behavior of the pagination does not align with the documentation according to https://stackoverflow.com/questions/39201093/how-to-use-boto3-pagination
+
+        What we'll do is to create a paginator and boto3 library handles the pagination automatically. We'll iterate through pages
+        and retrieve the items from page.
+
+        The MaxItems is the total number of items to return, and PageSize is the size of each page, we are assigning same value
+        to these two config. If MaxItems is more than PageSize then we expect MaxItems / PageSize pages in response_iterator will return
+        """
+        self.include_table_item_to_schema(dynamodb_client, region, table_name, schema)
+        if self.config.schema_sampling_size > PAGE_SIZE:
+            self.report.info(
+                title="Large schema sampling size configured",
+                message="High schema_sampling_size increases DynamoDB read capacity consumption and ingestion time.",
+                context=f"schema_sampling_size={self.config.schema_sampling_size}",
+            )
+        response_iterator = paginator.paginate(
+            TableName=table_name,
+            PaginationConfig={
+                "MaxItems": self.config.schema_sampling_size,
+                "PageSize": PAGE_SIZE,
+            },
+        )
+        # iterate through pagination result to retrieve items
+        for page in response_iterator:
+            items = page["Items"]
+            if len(items) > 0:
+                self.construct_schema_from_items(items, schema)
+
+        return schema
+
+    def include_table_item_to_schema(
+        self,
+        dynamodb_client: "DynamoDBClient",
+        region: str,
+        table_name: str,
+        schema: Dict[Tuple[str, ...], SchemaDescription],
+    ) -> None:
+        """
+        It will look up in the config include_table_item dict to see if "region.table_name" exists as key,
+        if it exists then get the items by primary key from the table and put it to schema
+        """
+        if self.config.include_table_item is None:
+            return
+        dataset_name = f"{region}.{table_name}"
+        if dataset_name not in self.config.include_table_item:
+            return
+        primary_key_list = self.config.include_table_item.get(dataset_name)
+        assert isinstance(primary_key_list, List)
+        if len(primary_key_list) > MAX_PRIMARY_KEYS_SIZE:
+            logger.info(
+                f"the provided primary keys list size exceeded the max size for table {dataset_name}, we'll only process the first {MAX_PRIMARY_KEYS_SIZE} items"
+            )
+            primary_key_list = primary_key_list[0:MAX_PRIMARY_KEYS_SIZE]
+        items: List[Dict[str, "AttributeValueTypeDef"]] = []
+        response = dynamodb_client.batch_get_item(
+            RequestItems={table_name: {"Keys": primary_key_list}}
+        ).get("Responses")
+        if response is None:
+            logger.error(
+                f"failed to retrieve item from table {table_name} by the given key {primary_key_list}"
+            )
+            return
+        logger.debug(
+            f"successfully retrieved {len(primary_key_list)} items based on supplied primary key list"
+        )
+        items = response.get(table_name) or []
+
+        self.construct_schema_from_items(items, schema)
+
+    def construct_schema_from_items(
+        self,
+        items: List[Dict[str, "AttributeValueTypeDef"]],
+        schema: Dict[Tuple[str, ...], SchemaDescription],
+    ) -> None:
+        """
+        https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/dynamodb.html#DynamoDB.Client.scan
+        each item in the list is a dict, the key represents the attribute name,
+        and the value is a one entry dict, more details in the below code comments
+        we are writing our own construct schema method, take the attribute name as key and SchemaDescription as value
+        """
+        for document in items:
+            self.append_schema(schema, document)
+
+    def append_schema(
+        self,
+        schema: Dict[Tuple[str, ...], SchemaDescription],
+        document: Dict[str, "AttributeValueTypeDef"],
+        parent_field_path: Tuple[str, ...] = (),
+    ) -> None:
+        # the key is the attribute name and the value is a dict with only one entry,
+        # whose key is the data type and value is the data and we will recursively expand
+        # map data type to get flattened field
+        for key, value in document.items():
+            if value is not None:
+                data_type = list(value.keys())[0]
+                attribute_value = value[data_type]  # type:ignore
+                current_field_path = parent_field_path + (key,)
+                # Handle nested maps by recursive calls
+                if data_type == "M":
+                    logger.debug(
+                        f"expanding nested fields for map, current_field_path: {current_field_path}"
+                    )
+                    self.append_schema(schema, attribute_value, current_field_path)
+
+                if current_field_path not in schema:
+                    schema[current_field_path] = {
+                        "types": Counter({data_type: 1}),
+                        "count": 1,
+                        # It seems we don't have collapsed field name so we are using attribute name here
+                        "delimited_name": FIELD_DELIMITER.join(current_field_path),
+                        "type": data_type,
+                        "nullable": False,
+                    }
+                else:
+                    schema[current_field_path]["types"].update({data_type: 1})
+                    schema[current_field_path]["count"] += 1
+                    # if we found an attribute name with different attribute type, we consider this attribute type as "mixed"
+                    if len(schema[current_field_path]["types"]) > 1:
+                        schema[current_field_path]["type"] = "mixed"
+                    schema[current_field_path]["nullable"] |= (
+                        attribute_value is None
+                    )  # Mark as nullable if null encountered
+                types = schema[current_field_path]["types"]
+                logger.debug(
+                    f"append schema with field_path: {current_field_path} and type: {types}"
+                )
+
+    def construct_schema_metadata(
+        self,
+        table_name: str,
+        dataset_urn: str,
+        dataset_properties: DatasetPropertiesClass,
+        schema: Dict[Tuple[str, ...], SchemaDescription],
+        primary_key_dict: Dict[str, str],
+    ) -> SchemaMetadataClass:
+        """ "
+        To construct the schema metadata, it will first sort the schema by the occurrence of attribute names
+        in descending order and truncate the schema by max_schema_size, and then start to construct the
+        schema metadata sorted by attribute name
+        """
+
+        canonical_schema: List[SchemaField] = []
+        schema_size = len(schema.values())
+        table_fields = list(schema.values())
+        if schema_size > self.config.max_schema_size:
+            # downsample the schema, using frequency as the sort key
+            self.report.warning(
+                title="Schema Size Too Large",
+                message="Downsampling the table schema because max_schema_size threshold was exceeded",
+                context=f"collection={dataset_urn}, max_schema_size={self.config.max_schema_size}",
+                log=False,
+            )
+
+            # Add this information to the custom properties so user can know they are looking at down sampled schema
+            dataset_properties.customProperties["schema.downsampled"] = "True"
+            dataset_properties.customProperties["schema.totalFields"] = f"{schema_size}"
+        # append each schema field, schema will be sorted by count descending and delimited_name ascending and sliced to only include max_schema_size items
+        primary_keys = []
+        for schema_field in sorted(
+            table_fields,
+            key=lambda x: (
+                -x["count"],
+                x["delimited_name"],
+            ),  # Negate `count` for descending order, `delimited_name` stays the same for ascending
+        )[: self.config.max_schema_size]:
+            field_path = schema_field["delimited_name"]
+            native_data_type = self.get_native_type(schema_field["type"], table_name)
+            type = self.get_field_type(schema_field["type"], table_name)
+            nullable = True
+            if field_path in primary_key_dict:
+                # primary key should not be nullable
+                type_key = (
+                    "Partition Key"
+                    if primary_key_dict.get(field_path) == "HASH"
+                    else "Sort Key"
+                )
+                dataset_properties.customProperties[type_key] = field_path
+                nullable = False
+                primary_keys.append(field_path)
+
+            field = SchemaField(
+                fieldPath=field_path,
+                nativeDataType=native_data_type,
+                type=type,
+                description=None,
+                nullable=nullable,
+                recursive=False,
+            )
+            canonical_schema.append(field)
+
+        # create schema metadata object for table
+        schema_metadata = SchemaMetadataClass(
+            schemaName=table_name,
+            platform=f"urn:li:dataPlatform:{self.platform}",
+            version=0,
+            hash="",
+            platformSchema=SchemalessClass(),
+            fields=canonical_schema,
+            primaryKeys=primary_keys,
+        )
+        return schema_metadata
+
+    def extract_primary_key_from_key_schema(
+        self, table_info: "TableDescriptionTypeDef"
+    ) -> Dict[str, str]:
+        key_schema = table_info.get("KeySchema")
+        primary_key_dict: Dict[str, str] = {}
+        assert isinstance(key_schema, List)
+        for key in key_schema:
+            attribute_name = key["AttributeName"]
+            key_type = key["KeyType"]
+            primary_key_dict[attribute_name] = key_type
+        return primary_key_dict
+
+    def get_native_type(self, attribute_type: Union[type, str], table_name: str) -> str:
+        assert isinstance(attribute_type, str)
+        type_string: Optional[str] = _attribute_type_to_native_type_mapping.get(
+            attribute_type
+        )
+        if type_string is None:
+            self.report.warning(
+                title="Unable to Map Attribute Type",
+                message="Unable to map attribute type to native data type",
+                context=f"attribute_type={attribute_type}, collection={table_name}",
+                log=False,
+            )
+            return _attribute_type_to_native_type_mapping[attribute_type]
+        return type_string
+
+    def get_field_type(
+        self, attribute_type: Union[type, str], table_name: str
+    ) -> SchemaFieldDataType:
+        assert isinstance(attribute_type, str)
+        type_class: Optional[type] = _attribute_type_to_field_type_mapping.get(
+            attribute_type
+        )
+
+        if type_class is None:
+            self.report.warning(
+                title="Unable to Map Field Type",
+                message="Unable to map attribute type to metadata schema field type",
+                context=f"attribute_type={attribute_type}, collection={table_name}",
+                log=False,
+            )
+            type_class = NullTypeClass
+        return SchemaFieldDataType(type=type_class())
+
+    def get_report(self) -> DynamoDBSourceReport:
+        return self.report
+
+    def _get_domain_wu(
+        self, dataset_name: str, entity_urn: str
+    ) -> Iterable[MetadataWorkUnit]:
+        domain_urn = None
+        for domain, pattern in self.config.domain.items():
+            if pattern.allowed(dataset_name):
+                domain_urn = make_domain_urn(
+                    self.domain_registry.get_domain_urn(domain)
+                )
+                break
+
+        if domain_urn:
+            yield from add_domain_to_entity_wu(
+                entity_urn=entity_urn,
+                domain_urn=domain_urn,
+            )
+
+    def _get_dynamodb_table_tags(
+        self,
+        dynamodb_client: "DynamoDBClient",
+        table_arn: str,
+    ) -> List["TagTypeDef"]:
+        resp = dynamodb_client.list_tags_of_resource(ResourceArn=table_arn)
+        return resp.get("Tags", [])
+
+    def _get_dynamodb_table_tags_wu(
+        self,
+        dynamodb_client: "DynamoDBClient",
+        table_arn: str,
+        dataset_urn: str,
+    ) -> Iterable[MetadataWorkUnit]:
+        """
+        Extract DynamoDB table AWS tags and emit them as DataHub tags.
+        """
+        try:
+            aws_tags_kv = self._get_dynamodb_table_tags(
+                dynamodb_client=dynamodb_client,
+                table_arn=table_arn,
+            )
+
+            tags = [
+                f"{tag_dict['Key']}:{tag_dict['Value']}"
+                if tag_dict.get("Value")
+                else f"{tag_dict['Key']}"
+                for tag_dict in aws_tags_kv
+                if tag_dict.get("Key")
+            ]
+
+            # Emit tags as a work unit (even if empty to remove existing tags)
+            yield from add_tags_to_entity_wu(
+                entity_type="dataset",
+                entity_urn=dataset_urn,
+                tags=tags,
+            )
+
+        except Exception as e:
+            self.report.warning(
+                title="DynamoDB Tags",
+                message="Failed to extract tags for table. This may be due to missing 'dynamodb:ListTagsOfResource' IAM permission.",
+                context=f"dataset_urn: {dataset_urn}; error={e}",
+                exc=e,
+            )
+
+    @staticmethod
+    def _build_export_s3_uri(s3_bucket: str, s3_prefix: Optional[str]) -> str:
+        if not s3_prefix:
+            return f"{S3_URI_PREFIX}{s3_bucket}"
+        normalized_prefix = s3_prefix.strip("/")
+        if not normalized_prefix:
+            return f"{S3_URI_PREFIX}{s3_bucket}"
+        return f"{S3_URI_PREFIX}{s3_bucket}/{normalized_prefix}"
+
+    def _list_completed_export_arns(
+        self,
+        dynamodb_client: "DynamoDBClient",
+        table_arn: str,
+        dataset_name: str,
+        max_exports: int,
+    ) -> List[str]:
+        """List COMPLETED export ARNs for a table, returning whatever was collected on error.
+
+        Error handling lives here (not the caller) so a failure on a later page still returns the
+        pages already collected. Collection stops once more than ``max_exports`` ARNs have been
+        seen (so ListExports isn't paged past what the caller will describe), and is otherwise
+        bounded by page count and a repeating-token guard. The stop fires only after a full page
+        is drained, so the result can exceed ``max_exports`` by up to a page; returning more than
+        ``max_exports`` lets the caller detect — and warn about — truncation.
+        """
+        export_arns: List[str] = []
+        next_token: Optional[str] = None
+        seen_tokens: Set[str] = set()
+        for _ in range(MAX_EXPORT_PAGES):
+            try:
+                if next_token:
+                    response = dynamodb_client.list_exports(
+                        TableArn=table_arn,
+                        NextToken=next_token,
+                    )
+                else:
+                    response = dynamodb_client.list_exports(TableArn=table_arn)
+            except Exception as e:
+                self.report.warning(
+                    title="DynamoDB S3 Export Lineage",
+                    message=(
+                        "Failed to list DynamoDB table exports. This may be due to missing "
+                        "'dynamodb:ListExports' IAM permission."
+                    ),
+                    context=f"dataset={dataset_name}; error={e}",
+                    exc=e,
+                    log=False,
+                )
+                break
+            for summary in response.get("ExportSummaries") or []:
+                if summary.get("ExportStatus") != EXPORT_STATUS_COMPLETED:
+                    continue
+                export_arn = summary.get("ExportArn")
+                if export_arn:
+                    export_arns.append(export_arn)
+            if len(export_arns) > max_exports:
+                break
+            next_token = response.get("NextToken")
+            if not next_token:
+                break
+            if next_token in seen_tokens:
+                self.report.warning(
+                    title="DynamoDB S3 Export Lineage",
+                    message="ListExports returned a repeating pagination token; stopping to "
+                    "avoid an infinite loop.",
+                    context=f"dataset={dataset_name}",
+                    log=False,
+                )
+                break
+            seen_tokens.add(next_token)
+        else:
+            self.report.warning(
+                title="DynamoDB S3 Export Lineage",
+                message="Stopped listing exports after reaching the maximum number of pages; "
+                "some exports may be omitted.",
+                context=f"dataset={dataset_name}; max_pages={MAX_EXPORT_PAGES}",
+                log=False,
+            )
+        return export_arns
+
+    def _make_s3_export_urn(self, s3_uri: str) -> str:
+        """Build the S3 export dataset URN, applying s3_export_platform_instance when configured.
+
+        The two branches must stay equivalent to ``make_s3_urn_for_lineage`` aside from the
+        platform_instance; they only diverge on trailing-slash handling, which is unreachable
+        because ``_build_export_s3_uri`` already strips it.
+        """
+        if self.config.s3_export_platform_instance:
+            return make_dataset_urn_with_platform_instance(
+                platform="s3",
+                name=strip_s3_prefix(s3_uri),
+                platform_instance=self.config.s3_export_platform_instance,
+                env=self.config.env,
+            )
+        return make_s3_urn_for_lineage(s3_uri, self.config.env)
+
+    def _collect_s3_export_lineage(
+        self,
+        dynamodb_client: "DynamoDBClient",
+        table_arn: str,
+        dataset_urn: str,
+        dataset_name: str,
+        field_paths: Optional[List[str]] = None,
+    ) -> None:
+        max_exports = self.config.max_exports_per_table
+        export_arns = self._list_completed_export_arns(
+            dynamodb_client=dynamodb_client,
+            table_arn=table_arn,
+            dataset_name=dataset_name,
+            max_exports=max_exports,
+        )
+        truncated = len(export_arns) > max_exports
+
+        seen_s3_urns: Set[str] = set()
+        # Only retain field paths when column lineage is requested; otherwise they are never read.
+        resolved_field_paths = (
+            list(field_paths or [])
+            if self.config.include_s3_export_column_lineage
+            else []
+        )
+        for export_arn in export_arns[:max_exports]:
+            try:
+                export_description = (
+                    dynamodb_client.describe_export(ExportArn=export_arn).get(
+                        "ExportDescription"
+                    )
+                    or {}
+                )
+            except Exception as e:
+                self.report.warning(
+                    title="DynamoDB S3 Export Lineage",
+                    message=(
+                        "Failed to describe a DynamoDB table export. This may be due to missing "
+                        "'dynamodb:DescribeExport' IAM permission."
+                    ),
+                    context=f"dataset={dataset_name}; export_arn={export_arn}; error={e}",
+                    exc=e,
+                    log=False,
+                )
+                continue
+
+            s3_bucket = export_description.get("S3Bucket")
+            if not s3_bucket:
+                logger.debug(
+                    "Skipping DynamoDB export with no S3Bucket in its description: %s",
+                    export_arn,
+                )
+                continue
+
+            s3_uri = self._build_export_s3_uri(
+                s3_bucket=s3_bucket,
+                s3_prefix=export_description.get("S3Prefix"),
+            )
+            s3_urn = self._make_s3_export_urn(s3_uri)
+            if s3_urn in seen_s3_urns:
+                continue
+            seen_s3_urns.add(s3_urn)
+            self._s3_export_lineage.setdefault(s3_urn, {})[dataset_urn] = (
+                resolved_field_paths
+            )
+
+        if truncated:
+            self._report_export_truncation(dataset_name, max_exports, len(seen_s3_urns))
+
+    def _report_export_truncation(
+        self, dataset_name: str, max_exports: int, described_destinations: int
+    ) -> None:
+        """Surface export truncation, choosing severity from the destinations actually seen.
+
+        ListExports ordering is undocumented, so we can't know whether the dropped exports went to
+        new destinations without describing them — which is exactly what the cap avoids. The
+        described subset is the only evidence:
+
+        - ``>=2`` distinct destinations: the table demonstrably fans out, so dropped exports may hide
+          more destinations -> WARN.
+        - exactly ``1``: truncation is the expected case on a frequently-exported table (the premise
+          ``max_exports_per_table`` exists for) and the single destination is almost certainly
+          complete -> info.
+        - ``0``: every described export failed or lacked an S3 location (each already reported
+          per-export), so completeness can't be claimed -> info noting lineage may be partial.
+        """
+        context = (
+            f"dataset={dataset_name}; max_exports_per_table={max_exports}; "
+            f"described_destinations={described_destinations}"
+        )
+        if described_destinations >= 2:
+            self.report.warning(
+                title="DynamoDB S3 Export Lineage",
+                message="Table has more completed exports than max_exports_per_table and the "
+                "described subset already spans multiple S3 destinations, so some export "
+                "destinations may be missing from lineage.",
+                context=context,
+                log=False,
+            )
+        elif described_destinations == 1:
+            self.report.info(
+                title="DynamoDB S3 Export Lineage",
+                message="Table has more completed exports than max_exports_per_table; the described "
+                "subset all resolved to a single S3 destination, so lineage is likely complete, but "
+                "exports beyond the cap were not checked.",
+                context=context,
+                log=False,
+            )
+        else:
+            self.report.info(
+                title="DynamoDB S3 Export Lineage",
+                message="Table has more completed exports than max_exports_per_table and none of the "
+                "described subset resolved to an S3 destination, so S3 export lineage may be "
+                "incomplete for this table.",
+                context=context,
+                log=False,
+            )
+
+    def _s3_field_paths_by_simple_name(
+        self, s3_urn: str, schema_metadata: SchemaMetadataClass
+    ) -> Dict[str, str]:
+        """Map ``lowercased simple field path`` -> ``stored field path`` for the S3 dataset."""
+        resolved: Dict[str, str] = {}
+        ambiguous: Set[str] = set()
+        for schema_field in schema_metadata.fields:
+            simple = get_simple_field_path_from_v2_field_path(
+                schema_field.fieldPath
+            ).lower()
+            # Keep the stored path: v2 paths only match the dataset's schemaField URNs as-is.
+            if resolved.get(simple, schema_field.fieldPath) != schema_field.fieldPath:
+                ambiguous.add(simple)
+            resolved[simple] = schema_field.fieldPath
+        if ambiguous:
+            # Union branches or case variants: any one choice could be the wrong field.
+            self.report.info(
+                title="DynamoDB S3 export column lineage skipped ambiguous fields",
+                message="Several S3 export fields share these names, so no column-level "
+                "lineage was emitted for them.",
+                context=f"{s3_urn}: {', '.join(sorted(ambiguous))}",
+            )
+        return {k: v for k, v in resolved.items() if k not in ambiguous}
+
+    def _build_s3_export_fine_grained_lineages(
+        self,
+        s3_urn: str,
+        upstream_urn: str,
+        field_paths: List[str],
+        downstream_field_paths: Optional[Dict[str, str]],
+    ) -> List[FineGrainedLineageClass]:
+        fine_grained: List[FineGrainedLineageClass] = []
+        for field_path in field_paths:
+            upstream_simple = get_simple_field_path_from_v2_field_path(field_path)
+            if downstream_field_paths is not None:
+                # S3 dataset is known: only link fields that actually exist on it.
+                downstream_path = downstream_field_paths.get(upstream_simple.lower())
+                if downstream_path is None:
+                    continue
+                self.report.s3_export_column_lineage_resolved += 1
+            else:
+                # No schema to check against: inferred identity mapping, best-effort.
+                downstream_path = upstream_simple
+                self.report.s3_export_column_lineage_inferred += 1
+            fine_grained.append(
+                FineGrainedLineageClass(
+                    downstreamType=FineGrainedLineageDownstreamTypeClass.FIELD,
+                    downstreams=[make_schema_field_urn(s3_urn, downstream_path)],
+                    upstreamType=FineGrainedLineageUpstreamTypeClass.FIELD_SET,
+                    upstreams=[make_schema_field_urn(upstream_urn, upstream_simple)],
+                )
+            )
+        return fine_grained
+
+    def _build_s3_export_column_lineage(
+        self, s3_urn: str, upstreams_by_urn: Dict[str, List[str]]
+    ) -> List[FineGrainedLineageClass]:
+        # None means no schema to check against, so DynamoDB field paths are used as-is.
+        downstream_field_paths: Optional[Dict[str, str]] = None
+        if self.ctx.graph:
+            try:
+                schema_metadata = self.ctx.graph.get_schema_metadata(s3_urn)
+            except Exception as e:
+                # The dataset may exist with a different schema, so guessed column edges could
+                # be wrong. Keep the table-level lineage only.
+                self.report.warning(
+                    title="Failed to read S3 export schema from DataHub",
+                    message="Could not fetch the S3 export dataset's schema from DataHub, so no "
+                    "column-level lineage was emitted for it. Table-level lineage is unaffected.",
+                    context=s3_urn,
+                    exc=e,
+                    log=False,
+                )
+                return []
+            if schema_metadata:
+                downstream_field_paths = self._s3_field_paths_by_simple_name(
+                    s3_urn, schema_metadata
+                )
+        fine_grained: List[FineGrainedLineageClass] = []
+        for upstream_urn in sorted(upstreams_by_urn):
+            fine_grained.extend(
+                self._build_s3_export_fine_grained_lineages(
+                    s3_urn=s3_urn,
+                    upstream_urn=upstream_urn,
+                    field_paths=upstreams_by_urn[upstream_urn],
+                    downstream_field_paths=downstream_field_paths,
+                )
+            )
+        if downstream_field_paths is None and fine_grained:
+            # info, not warning: with no schema to check against, inferred column lineage is the
+            # documented behaviour, not an error.
+            self.report.info(
+                title="DynamoDB S3 export column lineage is inferred",
+                message="Column-level lineage was emitted using the DynamoDB field paths as-is "
+                "because the S3 export dataset has no schema in DataHub (no DataHub connection, "
+                "or the dataset is not ingested). These edges are not validated against the "
+                "export's real schema; ingest the S3 export bucket for validated column lineage.",
+                context=s3_urn,
+            )
+        elif (
+            downstream_field_paths is not None
+            and not fine_grained
+            and any(upstreams_by_urn.values())
+        ):
+            # Resolved the S3 schema but nothing matched: distinguish this from column lineage
+            # being switched off or the table having no inferred fields (all emit None).
+            self.report.warning(
+                title="DynamoDB S3 export column lineage produced no matches",
+                message="The S3 export dataset's schema was found but none of the DynamoDB field "
+                "paths matched it (case-insensitive), so no column-level lineage was emitted. "
+                "This is expected when the export format (DynamoDB JSON/Ion) uses different field "
+                "paths than the connector's flattened schema.",
+                context=s3_urn,
+                log=False,
+            )
+        return fine_grained
+
+    def _check_s3_export_destination_exists(self, s3_urn: str) -> None:
+        if not self.ctx.graph:
+            return
+        try:
+            # graph.exists is true for the lineage-only entity this patch creates on
+            # the previous run, so look for datasetProperties, which the S3 source
+            # writes and the lineage patch does not.
+            exists = (
+                self.ctx.graph.get_aspect(s3_urn, DatasetPropertiesClass) is not None
+            )
+        except Exception as e:
+            self.report.warning(
+                title="Failed to check S3 export destination in DataHub",
+                message="Could not check whether the S3 export dataset was ingested into DataHub. "
+                "Lineage is still emitted.",
+                context=s3_urn,
+                exc=e,
+                log=False,
+            )
+            return
+        if not exists:
+            self.report.s3_export_destinations_not_in_datahub.append(s3_urn)
+
+    def _emit_s3_export_lineage(self) -> Iterable[MetadataWorkUnit]:
+        # Count distinct destinations, not (table, destination) pairs: two tables exporting to the
+        # same prefix are one location.
+        self.report.s3_export_locations_found = len(self._s3_export_lineage)
+        for s3_urn, upstreams_by_urn in self._s3_export_lineage.items():
+            self._check_s3_export_destination_exists(s3_urn)
+            upstreams = [
+                UpstreamClass(
+                    dataset=upstream_urn,
+                    type=DatasetLineageTypeClass.COPY,
+                )
+                for upstream_urn in sorted(upstreams_by_urn)
+            ]
+            fine_grained: List[FineGrainedLineageClass] = (
+                self._build_s3_export_column_lineage(s3_urn, upstreams_by_urn)
+                if self.config.include_s3_export_column_lineage
+                else []
+            )
+            self.report.s3_export_lineage_edges += len(upstreams)
+            # Patch rather than replace: other sources (Glue, Spark, other DynamoDB recipes)
+            # can write upstreams to the same S3 dataset.
+            patch_builder = DatasetPatchBuilder(s3_urn)
+            for upstream in upstreams:
+                patch_builder.add_upstream_lineage(upstream)
+            for fine_grained_lineage in fine_grained:
+                patch_builder.add_fine_grained_lineage(fine_grained_lineage)
+            for mcp in patch_builder.build():
+                # is_primary_source=False keeps S3 export datasets out of stateful ingestion
+                # tracking so the DynamoDB source can't soft-delete S3 entities it doesn't own.
+                yield MetadataWorkUnit(
+                    id=MetadataWorkUnit.generate_workunit_id(mcp),
+                    mcp_raw=mcp,
+                    is_primary_source=False,
+                )
+
+        missing = self.report.s3_export_destinations_not_in_datahub
+        if missing:
+            # The LossyList only shows in the raw report; one aggregated entry also
+            # surfaces it in the UI's structured logs.
+            self.report.info(
+                title="S3 export destinations not ingested in DataHub",
+                message="These export destinations have no dataset ingested by another "
+                "source, so their lineage lands on a lineage-only S3 entity. Check the S3 "
+                "source's path_spec and platform_instance, or ingest the bucket.",
+                context=", ".join(missing),
+            )

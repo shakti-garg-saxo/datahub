@@ -3,12 +3,51 @@ query getGroup($urn: String!, $membersCount: Int!) {
         urn
         type
         name
+        exists
+        origin {
+            type
+            externalType
+        }
         info {
             displayName
             description
             email
         }
-        relationships(input: { types: ["IsMemberOfGroup"], direction: INCOMING, start: 0, count: $membersCount }) {
+        editableProperties {
+            description
+            slack
+            email
+            pictureLink
+        }
+        properties {
+            displayName
+            description
+            email
+            slack
+        }
+        privileges {
+            ...entityPrivileges
+        }
+        autoRenderAspects: aspects(input: { autoRenderOnly: true }) {
+            ...autoRenderAspectFields
+        }
+        structuredProperties {
+            properties {
+                ...structuredPropertiesFields
+            }
+        }
+        ownership {
+            ...ownershipFields
+        }
+        relationships(
+            input: {
+                types: ["IsMemberOfGroup", "IsMemberOfNativeGroup"]
+                direction: INCOMING
+                start: 0
+                count: $membersCount
+                includeSoftDelete: false
+            }
+        ) {
             start
             count
             total
@@ -25,7 +64,51 @@ query getGroup($urn: String!, $membersCount: Int!) {
                             lastName
                             fullName
                         }
-                        editableInfo {
+                        editableProperties {
+                            displayName
+                            title
+                            pictureLink
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+query getAllGroupMembers($urn: String!, $start: Int!, $count: Int!) {
+    corpGroup(urn: $urn) {
+        relationships(
+            input: {
+                types: ["IsMemberOfGroup", "IsMemberOfNativeGroup"]
+                direction: INCOMING
+                start: $start
+                count: $count
+                includeSoftDelete: false
+            }
+        ) {
+            start
+            count
+            total
+            relationships {
+                entity {
+                    ... on CorpUser {
+                        urn
+                        username
+                        info {
+                            active
+                            displayName
+                            title
+                            firstName
+                            lastName
+                            fullName
+                        }
+                        properties {
+                            displayName
+                        }
+                        editableProperties {
+                            displayName
+                            title
                             pictureLink
                         }
                     }
@@ -37,7 +120,15 @@ query getGroup($urn: String!, $membersCount: Int!) {
 
 query getGroupMembers($urn: String!, $start: Int!, $count: Int!) {
     corpGroup(urn: $urn) {
-        relationships(input: { types: ["IsMemberOfGroup"], direction: INCOMING, start: $start, count: $count }) {
+        relationships(
+            input: {
+                types: ["IsMemberOfGroup"]
+                direction: INCOMING
+                start: $start
+                count: $count
+                includeSoftDelete: false
+            }
+        ) {
             start
             count
             total
@@ -54,14 +145,32 @@ query getGroupMembers($urn: String!, $start: Int!, $count: Int!) {
                             lastName
                             fullName
                         }
-                        editableInfo {
+                        properties {
+                            displayName
+                        }
+                        editableProperties {
+                            displayName
+                            title
                             pictureLink
                         }
                     }
                 }
             }
         }
-        otherMembers: relationships(input: { types: ["isOwner"], direction: INCOMING, start: $start, count: $count }) {
+    }
+}
+
+query getNativeGroupMembers($urn: String!, $start: Int!, $count: Int!) {
+    corpGroup(urn: $urn) {
+        relationships(
+            input: {
+                types: ["IsMemberOfNativeGroup"]
+                direction: INCOMING
+                start: $start
+                count: $count
+                includeSoftDelete: false
+            }
+        ) {
             start
             count
             total
@@ -78,36 +187,106 @@ query getGroupMembers($urn: String!, $start: Int!, $count: Int!) {
                             lastName
                             fullName
                         }
-                        editableInfo {
-                            pictureLink
+                        properties {
+                            displayName
                         }
-                    }
-                }
-            }
-        }
-        andMore: relationships(input: { types: ["DownstreamOf"], direction: INCOMING, start: $start, count: $count }) {
-            start
-            count
-            total
-            relationships {
-                entity {
-                    ... on CorpUser {
-                        urn
-                        username
-                        info {
-                            active
+                        editableProperties {
                             displayName
                             title
-                            firstName
-                            lastName
-                            fullName
-                        }
-                        editableInfo {
                             pictureLink
                         }
                     }
                 }
             }
         }
+    }
+}
+
+# Fetched by the hover card on open, so owner lists don't run a member count for every group owner.
+query getGroupMemberCount($urn: String!) {
+    corpGroup(urn: $urn) {
+        urn
+        type
+        memberCount: relationships(
+            input: {
+                types: ["IsMemberOfGroup", "IsMemberOfNativeGroup"]
+                direction: INCOMING
+                start: 0
+                count: 0
+                includeSoftDelete: false
+            }
+        ) {
+            total
+        }
+    }
+}
+
+query listGroups($input: ListGroupsInput!) {
+    listGroups(input: $input) {
+        start
+        count
+        total
+        groups {
+            urn
+            type
+            name
+            origin {
+                type
+                externalType
+            }
+            info {
+                displayName
+                description
+                email
+            }
+            editableProperties {
+                description
+                pictureLink
+            }
+            memberCount: relationships(
+                input: {
+                    types: ["IsMemberOfGroup", "IsMemberOfNativeGroup"]
+                    direction: INCOMING
+                    start: 0
+                    count: 1
+                    includeSoftDelete: false
+                }
+            ) {
+                total
+            }
+            roles: relationships(input: { types: ["IsMemberOfRole"], direction: OUTGOING, start: 0 }) {
+                relationships {
+                    entity {
+                        ... on DataHubRole {
+                            urn
+                            type
+                            name
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+mutation addGroupMembers($groupUrn: String!, $userUrns: [String!]!) {
+    addGroupMembers(input: { groupUrn: $groupUrn, userUrns: $userUrns })
+}
+
+mutation removeGroupMembers($groupUrn: String!, $userUrns: [String!]!) {
+    removeGroupMembers(input: { groupUrn: $groupUrn, userUrns: $userUrns })
+}
+
+mutation removeGroup($urn: String!) {
+    removeGroup(urn: $urn)
+}
+
+mutation createGroup($input: CreateGroupInput!) {
+    createGroup(input: $input)
+}
+
+mutation updateCorpGroupProperties($urn: String!, $input: CorpGroupUpdateInput!) {
+    updateCorpGroupProperties(urn: $urn, input: $input) {
+        urn
     }
 }

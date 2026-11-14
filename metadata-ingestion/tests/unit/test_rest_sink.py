@@ -1,14 +1,26 @@
+import contextlib
 import json
+import threading
+from datetime import datetime, timezone
+from unittest.mock import MagicMock
 
 import pytest
 import requests
+import time_machine
 
 import datahub.metadata.schema_classes as models
 from datahub.emitter.mcp import MetadataChangeProposalWrapper
-from datahub.emitter.rest_emitter import DatahubRestEmitter
+from datahub.emitter.rest_emitter import DatahubRestEmitter, EmitMode
+from datahub.ingestion.graph.config import DatahubClientConfig
+from datahub.ingestion.sink.datahub_rest import (
+    DatahubRestSink,
+    DatahubRestSinkConfig,
+    RestSinkMode,
+)
 
 MOCK_GMS_ENDPOINT = "http://fakegmshost:8080"
 
+FROZEN_TIME = 1618987484580
 basicAuditStamp = models.AuditStampClass(
     time=1618987484580,
     actor="urn:li:corpuser:datahub",
@@ -75,43 +87,15 @@ basicAuditStamp = models.AuditStampClass(
                         }
                     }
                 },
-                "systemMetadata": {},
-            },
-        ),
-        (
-            # Verify the behavior of the fieldDiscriminator for primitive enums.
-            models.MetadataChangeEventClass(
-                proposedSnapshot=models.MLModelSnapshotClass(
-                    urn="urn:li:mlModel:(urn:li:dataPlatform:science,scienceModel,PROD)",
-                    aspects=[
-                        models.CostClass(
-                            costType=models.CostTypeClass.ORG_COST_TYPE,
-                            cost=models.CostCostClass(
-                                fieldDiscriminator=models.CostCostDiscriminatorClass.costCode,
-                                costCode="sampleCostCode",
-                            ),
-                        )
-                    ],
-                )
-            ),
-            "/entities?action=ingest",
-            {
-                "entity": {
-                    "value": {
-                        "com.linkedin.metadata.snapshot.MLModelSnapshot": {
-                            "urn": "urn:li:mlModel:(urn:li:dataPlatform:science,scienceModel,PROD)",
-                            "aspects": [
-                                {
-                                    "com.linkedin.common.Cost": {
-                                        "costType": "ORG_COST_TYPE",
-                                        "cost": {"costCode": "sampleCostCode"},
-                                    }
-                                }
-                            ],
-                        }
-                    }
+                "systemMetadata": {
+                    "lastObserved": FROZEN_TIME,
+                    "lastRunId": "no-run-id-provided",
+                    "properties": {
+                        "clientId": "acryl-datahub",
+                        "clientVersion": "1!0.0.0.dev0",
+                    },
+                    "runId": "no-run-id-provided",
                 },
-                "systemMetadata": {},
             },
         ),
         (
@@ -161,7 +145,15 @@ basicAuditStamp = models.AuditStampClass(
                         }
                     }
                 },
-                "systemMetadata": {},
+                "systemMetadata": {
+                    "lastObserved": FROZEN_TIME,
+                    "lastRunId": "no-run-id-provided",
+                    "properties": {
+                        "clientId": "acryl-datahub",
+                        "clientVersion": "1!0.0.0.dev0",
+                    },
+                    "runId": "no-run-id-provided",
+                },
             },
         ),
         (
@@ -197,7 +189,15 @@ basicAuditStamp = models.AuditStampClass(
                         }
                     }
                 },
-                "systemMetadata": {},
+                "systemMetadata": {
+                    "lastObserved": FROZEN_TIME,
+                    "lastRunId": "no-run-id-provided",
+                    "properties": {
+                        "clientId": "acryl-datahub",
+                        "clientVersion": "1!0.0.0.dev0",
+                    },
+                    "runId": "no-run-id-provided",
+                },
             },
         ),
         (
@@ -249,10 +249,7 @@ basicAuditStamp = models.AuditStampClass(
         ),
         (
             MetadataChangeProposalWrapper(
-                entityType="dataset",
                 entityUrn="urn:li:dataset:(urn:li:dataPlatform:foo,bar,PROD)",
-                changeType=models.ChangeTypeClass.UPSERT,
-                aspectName="ownership",
                 aspect=models.OwnershipClass(
                     owners=[
                         models.OwnerClass(
@@ -268,26 +265,39 @@ basicAuditStamp = models.AuditStampClass(
             ),
             "/aspects?action=ingestProposal",
             {
+                "async": "false",
                 "proposal": {
                     "entityType": "dataset",
                     "entityUrn": "urn:li:dataset:(urn:li:dataPlatform:foo,bar,PROD)",
                     "changeType": "UPSERT",
                     "aspectName": "ownership",
                     "aspect": {
-                        "value": '{"owners": [{"owner": "urn:li:corpuser:fbar", "type": "DATAOWNER"}], "lastModified": {"time": 0, "actor": "urn:li:corpuser:fbar"}}',
+                        "value": '{"owners": [{"owner": "urn:li:corpuser:fbar", "type": "DATAOWNER"}], "ownerTypes": {}, "lastModified": {"time": 0, "actor": "urn:li:corpuser:fbar"}}',
                         "contentType": "application/json",
                     },
-                }
+                    "systemMetadata": {
+                        "lastObserved": FROZEN_TIME,
+                        "lastRunId": "no-run-id-provided",
+                        "properties": {
+                            "clientId": "acryl-datahub",
+                            "clientVersion": "1!0.0.0.dev0",
+                        },
+                        "runId": "no-run-id-provided",
+                    },
+                },
             },
         ),
     ],
 )
+@time_machine.travel(
+    datetime.fromtimestamp(FROZEN_TIME / 1000, tz=timezone.utc), tick=False
+)
 def test_datahub_rest_emitter(requests_mock, record, path, snapshot):
     def match_request_text(request: requests.Request) -> bool:
         requested_snapshot = request.json()
-        assert (
-            requested_snapshot == snapshot
-        ), f"Expected snapshot to be {json.dumps(snapshot)}, got {json.dumps(requested_snapshot)}"
+        assert requested_snapshot == snapshot, (
+            f"Expected snapshot to be {json.dumps(snapshot)}, got {json.dumps(requested_snapshot)}"
+        )
         return True
 
     requests_mock.post(
@@ -296,5 +306,209 @@ def test_datahub_rest_emitter(requests_mock, record, path, snapshot):
         additional_matcher=match_request_text,
     )
 
-    emitter = DatahubRestEmitter(MOCK_GMS_ENDPOINT)
-    emitter.emit(record)
+    with contextlib.ExitStack() as stack:
+        if isinstance(record, models.UsageAggregationClass):
+            stack.enter_context(
+                pytest.warns(
+                    DeprecationWarning,
+                    match="Use emit with a datasetUsageStatistics aspect instead",
+                )
+            )
+
+        # This test specifically exercises the restli emitter endpoints.
+        # We have additional tests specifically for the OpenAPI emitter
+        # and its request format.
+        emitter = DatahubRestEmitter(MOCK_GMS_ENDPOINT, openapi_ingestion=False)
+        stack.enter_context(emitter)
+        emitter.emit(record)
+
+
+@pytest.mark.parametrize(
+    "sink_mode,configured_emit_mode,expected_emit_mode",
+    [
+        # Compatible: async sink + async emit mode → use configured
+        (RestSinkMode.ASYNC_BATCH, EmitMode.ASYNC, EmitMode.ASYNC),
+        (RestSinkMode.ASYNC_BATCH, EmitMode.ASYNC_WAIT, EmitMode.ASYNC_WAIT),
+        (RestSinkMode.ASYNC, EmitMode.ASYNC, EmitMode.ASYNC),
+        (RestSinkMode.ASYNC, EmitMode.ASYNC_WAIT, EmitMode.ASYNC_WAIT),
+        # Incompatible: async sink + sync emit mode → override to ASYNC
+        (RestSinkMode.ASYNC_BATCH, EmitMode.SYNC_PRIMARY, EmitMode.ASYNC),
+        (RestSinkMode.ASYNC, EmitMode.SYNC_PRIMARY, EmitMode.ASYNC),
+        # Compatible: sync sink + sync emit mode → use configured
+        (RestSinkMode.SYNC, EmitMode.SYNC_PRIMARY, EmitMode.SYNC_PRIMARY),
+        (RestSinkMode.SYNC, EmitMode.SYNC_WAIT, EmitMode.SYNC_WAIT),
+        # Incompatible: sync sink + async emit mode → override to SYNC_PRIMARY
+        (RestSinkMode.SYNC, EmitMode.ASYNC, EmitMode.SYNC_PRIMARY),
+    ],
+)
+def test_resolve_gms_emit_mode(sink_mode, configured_emit_mode, expected_emit_mode):
+    """Guard rail: _resolve_gms_emit_mode picks a compatible EmitMode for the sink mode."""
+    from datahub.ingestion.sink.datahub_rest import _resolve_gms_emit_mode
+
+    assert _resolve_gms_emit_mode(sink_mode, configured_emit_mode) == expected_emit_mode
+
+
+def test_configured_gms_emit_mode_reads_env_set_after_import(monkeypatch):
+    """The datapack loader sets DATAHUB_EMIT_MODE per file, after rest_emitter is
+    imported; the sink must still see async_wait so the file is awaited."""
+    from datahub.ingestion.sink.datahub_rest import (
+        _configured_gms_emit_mode,
+        _resolve_gms_emit_mode,
+    )
+
+    monkeypatch.setenv("DATAHUB_EMIT_MODE", "async_wait")
+    configured = _configured_gms_emit_mode()
+    assert configured == EmitMode.ASYNC_WAIT
+    assert (
+        _resolve_gms_emit_mode(RestSinkMode.ASYNC_BATCH, configured)
+        == EmitMode.ASYNC_WAIT
+    )
+
+    monkeypatch.delenv("DATAHUB_EMIT_MODE")
+    assert _configured_gms_emit_mode() == EmitMode.SYNC_PRIMARY
+
+
+class TestDatahubRestSinkTcpKeepalive:
+    """Regression tests covering end-to-end tcp_keepalive propagation through
+    the REST sink: from the recipe config, through the sink config, into the
+    per-thread DataHubRestEmitter, and finally into the underlying
+    requests.Session adapter. We verify the full chain here so a future
+    refactor can't silently regress it.
+    """
+
+    def test_sink_make_emitter_passes_tcp_keepalive(self):
+        """DatahubRestSink.make_emitter must hand tcp_keepalive to the emitter."""
+        from requests.adapters import HTTPAdapter
+
+        from datahub.emitter.rest_emitter import _KeepAliveHTTPAdapter
+        from datahub.ingestion.sink.datahub_rest import (
+            DatahubRestSink,
+            DatahubRestSinkConfig,
+        )
+
+        cfg = DatahubRestSinkConfig(server="http://localhost:8080", tcp_keepalive=True)
+        emitter = DatahubRestSink.make_emitter(cfg)
+        assert isinstance(
+            emitter._session.get_adapter("https://example.com"), _KeepAliveHTTPAdapter
+        )
+
+        cfg = DatahubRestSinkConfig(server="http://localhost:8080", tcp_keepalive=False)
+        emitter = DatahubRestSink.make_emitter(cfg)
+        assert type(emitter._session.get_adapter("https://example.com")) is HTTPAdapter
+
+
+def test_emit_batch_wrapper_uses_resolved_emit_mode():
+    """Regression test: _emit_batch_wrapper must pass self._gms_emit_mode to emit_mcps."""
+
+    mcp = MetadataChangeProposalWrapper(
+        entityUrn="urn:li:dataset:(urn:li:dataPlatform:foo,bar,PROD)",
+        aspect=models.StatusClass(removed=False),
+    )
+
+    mock_emitter = MagicMock()
+    mock_emitter.emit_mcps.return_value = [MagicMock()]
+
+    sink = DatahubRestSink.__new__(DatahubRestSink)
+    sink._emitter_thread_local = threading.local()
+    sink._emitter_thread_local.emitter = mock_emitter
+    sink._gms_emit_mode = EmitMode.ASYNC
+    sink.report = MagicMock()
+
+    sink._emit_batch_wrapper([(mcp,)])
+
+    mock_emitter.emit_mcps.assert_called_once()
+    call_kwargs = mock_emitter.emit_mcps.call_args
+    actual_mode = call_kwargs[1]["emit_mode"]
+    assert actual_mode == EmitMode.ASYNC, (
+        f"Expected self._gms_emit_mode (ASYNC) but got {actual_mode}. "
+        "The batch wrapper must use the resolved emit mode."
+    )
+
+
+class TestDataHubRestSinkBatchEmission:
+    """Tests for DatahubRestSink._emit_batch_wrapper behavior."""
+
+    def test_emit_batch_wrapper_logs_when_batches_split(self, caplog):
+        """Test that _emit_batch_wrapper logs info when emit_mcps returns multiple chunks."""
+        from unittest.mock import MagicMock, PropertyMock, patch
+
+        from datahub.emitter.response_helper import TraceData
+        from datahub.ingestion.sink.datahub_rest import (
+            DatahubRestSink,
+            DataHubRestSinkReport,
+        )
+
+        # Create mock emitter that returns multiple TraceData objects
+        mock_emitter = MagicMock()
+        mock_emitter.emit_mcps.return_value = [
+            TraceData(trace_id="trace-1", data={"urn:li:dataset:1": ["status"]}),
+            TraceData(trace_id="trace-2", data={"urn:li:dataset:2": ["status"]}),
+        ]
+
+        # Create sink with mocked emitter property
+        with (
+            patch.object(
+                DatahubRestSink, "__init__", lambda self, *args, **kwargs: None
+            ),
+            patch.object(
+                DatahubRestSink, "emitter", new_callable=PropertyMock
+            ) as mock_emitter_prop,
+        ):
+            mock_emitter_prop.return_value = mock_emitter
+            sink = DatahubRestSink.__new__(DatahubRestSink)
+            sink._gms_emit_mode = EmitMode.ASYNC
+            sink.report = DataHubRestSinkReport()
+
+            # Create test MCPs
+            mcps: list = [
+                (
+                    MetadataChangeProposalWrapper(
+                        entityUrn=f"urn:li:dataset:(urn:li:dataPlatform:test,table{i},PROD)",
+                        aspect=models.StatusClass(removed=False),
+                    ),
+                )
+                for i in range(2)
+            ]
+
+            # Call _emit_batch_wrapper
+            with caplog.at_level("INFO"):
+                sink._emit_batch_wrapper(mcps)
+
+            # Verify report was updated
+            assert sink.report.async_batches_prepared == 1
+            assert sink.report.async_batches_split == 2
+
+            # Verify log message
+            assert "payload was split into 2 batches" in caplog.text
+
+
+def test_sync_origin_opt_in_passed_through_in_all_modes():
+    from datahub.ingestion.sink.datahub_rest import (
+        DatahubRestSinkConfig,
+        RestSinkMode,
+    )
+
+    # Marker-aware sync routing only ever upgrades a batch to sync, never
+    # downgrades it, so it is a no-op in SYNC mode (already synchronous) and the
+    # opt-in is passed through unconditionally regardless of sink mode.
+    for mode in (RestSinkMode.SYNC, RestSinkMode.ASYNC, RestSinkMode.ASYNC_BATCH):
+        emitter = DatahubRestSink.make_emitter(
+            DatahubRestSinkConfig(
+                server="http://localhost:8080",
+                mode=mode,
+                respect_mcp_sync_marker=True,
+            )
+        )
+        assert emitter.respect_mcp_sync_marker is True
+
+
+def test_rest_sink_config_accepts_client_config_dump():
+    # The Kafka default sink builds its REST fallback via
+    # DatahubRestSinkConfig(**DatahubClientConfig(...).model_dump()). Under
+    # ConfigModel's extra="forbid", that round-trip breaks the moment a base
+    # client-config field isn't also a DatahubRestSinkConfig field. Guard it so
+    # such a drift fails here (a targeted unit test) instead of at runtime on
+    # every Kafka-default ingestion run.
+    client = DatahubClientConfig(server="http://localhost:8080")
+    cfg = DatahubRestSinkConfig(**client.model_dump())
+    assert cfg.server == "http://localhost:8080"

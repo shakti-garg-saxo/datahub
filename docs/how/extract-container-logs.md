@@ -1,8 +1,12 @@
+---
+description: "Extract logs from running DataHub GMS and frontend containers to debug issues with the backend server and UI."
+---
+
 # How to Extract Logs from DataHub Containers
 
 DataHub containers, datahub GMS (backend server) and datahub frontend (UI server), write log files to the local container filesystem. To extract these logs, you'll need to get them from inside the container where the services are running.
 
-You can do so easily using the Docker CLI if you're deploying with vanilla docker or compose, and kubectl if you're on K8s. 
+You can do so easily using the Docker CLI if you're deploying with vanilla docker or compose, and kubectl if you're on K8s.
 
 ## Step 1: Find the id of the container you're interested in
 
@@ -15,14 +19,14 @@ To do so, you can view all containers that Docker knows about by running the fol
 ```
 johnjoyce@Johns-MBP datahub-fork % docker container ls
 CONTAINER ID   IMAGE                                   COMMAND                  CREATED      STATUS                  PORTS                                                      NAMES
-6c4a280bc457   linkedin/datahub-frontend-react   "datahub-frontend/bi…"   5 days ago   Up 46 hours (healthy)   0.0.0.0:9002->9002/tcp                                     datahub-frontend-react
-122a2488ab63   linkedin/datahub-gms              "/bin/sh -c /datahub…"   5 days ago   Up 5 days (healthy)     0.0.0.0:8080->8080/tcp                                     datahub-gms
+6c4a280bc457   acryldata/datahub-frontend-react   "datahub-frontend/bi…"   5 days ago   Up 46 hours (healthy)   0.0.0.0:9002->9002/tcp                                     datahub-frontend-react
+122a2488ab63   acryldata/datahub-gms              "/bin/sh -c /datahub…"   5 days ago   Up 5 days (healthy)     0.0.0.0:8080->8080/tcp                                     datahub-gms
 7682dcc64afa   confluentinc/cp-schema-registry:5.4.0   "/etc/confluent/dock…"   5 days ago   Up 5 days               0.0.0.0:8081->8081/tcp                                     schema-registry
 3680fcaef3ed   confluentinc/cp-kafka:5.4.0             "/etc/confluent/dock…"   5 days ago   Up 5 days               0.0.0.0:9092->9092/tcp, 0.0.0.0:29092->29092/tcp           broker
 9d6730ddd4c4   neo4j:4.0.6                             "/sbin/tini -g -- /d…"   5 days ago   Up 5 days               0.0.0.0:7474->7474/tcp, 7473/tcp, 0.0.0.0:7687->7687/tcp   neo4j
 c97edec663af   confluentinc/cp-zookeeper:5.4.0         "/etc/confluent/dock…"   5 days ago   Up 5 days               2888/tcp, 0.0.0.0:2181->2181/tcp, 3888/tcp                 zookeeper
-150ba161cf26   mysql:5.7                               "docker-entrypoint.s…"   5 days ago   Up 5 days               0.0.0.0:3306->3306/tcp, 33060/tcp                          mysql
-4b72a3eab73f   elasticsearch:7.9.3                     "/tini -- /usr/local…"   5 days ago   Up 5 days (healthy)     0.0.0.0:9200->9200/tcp, 9300/tcp                           elasticsearch
+150ba161cf26   mysql:8.2                               "docker-entrypoint.s…"   5 days ago   Up 5 days               0.0.0.0:3306->3306/tcp, 33060/tcp                          mysql
+4b72a3eab73f   opensearchproject/opensearch:2.19.3        "./opensearch-docker…"   5 days ago   Up 5 days (healthy)     0.0.0.0:9200->9200/tcp, 9600/tcp                           search
 ```
 
 In this case, the container id we'd like to note is `122a2488ab63`, which corresponds to the `datahub-gms` service.
@@ -59,13 +63,13 @@ There are 2 types of logs that are collected:
 Since log files are named based on the current date, you'll need to use "ls" to see which files currently exist. To do so, you can use the `docker exec` command, using the container id recorded in step one:
 
 ```
-docker exec --privileged <container-id> <shell-command> 
+docker exec --privileged <container-id> <shell-command>
 ```
 
 For example:
 
 ```
-johnjoyce@Johns-MBP datahub-fork % docker exec --privileged 122a2488ab63 ls -la /tmp/datahub/logs/gms 
+johnjoyce@Johns-MBP datahub-fork % docker exec --privileged 122a2488ab63 ls -la /tmp/datahub/logs/gms
 total 4664
 drwxr-xr-x    2 datahub  datahub       4096 Jul 28 05:14 .
 drwxr-xr-x    3 datahub  datahub       4096 Jul 23 08:37 ..
@@ -86,7 +90,7 @@ Depending on your issue, you may be interested to view both debug and normal inf
 Since log files are named based on the current date, you'll need to use "ls" to see which files currently exist. To do so, you can use the `kubectl exec` command, using the pod name recorded in step one:
 
 ```
-kubectl exec datahub-frontend-1231ead-6767 -n default -- ls -la /tmp/datahub/logs/gms
+kubectl exec datahub-gms-c578b47cd-7676 -n default -- ls -la /tmp/datahub/logs/gms
 
 total 36388
 drwxr-xr-x    2 datahub  datahub       4096 Jul 29 07:45 .
@@ -131,5 +135,5 @@ Now you should be able to view the logs locally.
 There are a few ways to get files out of the pod and into a local file. You can either use `kubectl cp` or simply `cat` and pipe the file of interest. We'll show an example using the latter approach:
 
 ```
-kubectl exec datahub-frontend-1231ead-6767 -n default -- cat /tmp/datahub/logs/gms/gms.log > my-local-gms.log
+kubectl exec datahub-gms-c578b47cd-7676 -n default -- cat /tmp/datahub/logs/gms/gms.log > my-local-gms.log
 ```

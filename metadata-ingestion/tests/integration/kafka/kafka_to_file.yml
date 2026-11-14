@@ -3,10 +3,14 @@ run_id: kafka-test
 source:
   type: kafka
   config:
+    ingest_schemas_as_entities: true
     connection:
-        bootstrap: "localhost:59092"
-        schema_registry_url: "http://localhost:58081"
-
+      bootstrap: "localhost:29092"
+      schema_registry_url: "http://localhost:28081"
+    domain:
+      "urn:li:domain:sales":
+        allow:
+          - "key_value_topic"
 sink:
   type: file
   config:

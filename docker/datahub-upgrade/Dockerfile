@@ -1,31 +1,54 @@
 # Defining environment
 ARG APP_ENV=prod
 
-FROM adoptopenjdk/openjdk8:alpine-jre as base
-ENV DOCKERIZE_VERSION v0.6.1
-RUN apk --no-cache add curl tar \
-    && curl -L https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz | tar -C /usr/local/bin -xzv
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+FROM ${BASE_IMAGE} AS base
 
-# Workaround alpine issue with /lib64 not being in the ld library path
-# https://gitlab.alpinelinux.org/alpine/aports/-/issues/10140
-ENV LD_LIBRARY_PATH=/lib64
+ARG APK_REPOSITORY_URL=https://apk.cgr.dev/chainguard
+ARG GITHUB_REPO_URL=https://github.com
+ARG MAVEN_CENTRAL_REPO_URL=https://repo1.maven.org/maven2
 
-FROM openjdk:8 as prod-build
-COPY . datahub-src
-RUN cd datahub-src && ./gradlew :datahub-upgrade:build
-RUN cd datahub-src && cp datahub-upgrade/build/libs/datahub-upgrade.jar ../datahub-upgrade.jar
+ENV JMX_VERSION=1.0.1
 
-FROM base as prod-install
-COPY --from=prod-build /datahub-upgrade.jar /datahub/datahub-upgrade/bin/
-COPY --from=prod-build /datahub-src/metadata-models/src/main/resources/entity-registry.yml /datahub/datahub-gms/resources/entity-registry.yml
+RUN printf '%s\n' "${APK_REPOSITORY_URL}" > /etc/apk/repositories \
+    && apk update --no-cache \
+    && apk upgrade --no-cache
 
-FROM base as dev-install
+COPY docker/snippets/setup_java_runtime.sh /tmp/setup_java_runtime.sh
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    chmod +x /tmp/setup_java_runtime.sh \
+    && mkdir -p /datahub/datahub-upgrade/lib \
+    && INSTALL_JATTACH=0 OTEL_JMX_DIR=/datahub/datahub-upgrade/lib /tmp/setup_java_runtime.sh \
+    && rm -f /tmp/setup_java_runtime.sh \
+    && chmod -R a+r /datahub/datahub-upgrade/lib
+
+COPY docker/snippets/wait_for_deps.sh /usr/local/lib/datahub/wait_for_deps.sh
+
+RUN addgroup -S datahub && adduser -S datahub -G datahub && chmod g-s /home/datahub
+
+FROM base AS prod-install
+# UPGRADE_JAR selects the boot archive: datahub-upgrade.jar (default, slim) or
+# datahub-upgrade-onnx.jar (datahub-upgrade-onnx variant, bundling ONNX/DJL). Destination filename
+# stays datahub-upgrade.jar so start.sh is unchanged.
+ARG UPGRADE_JAR=datahub-upgrade.jar
+COPY datahub-upgrade/build/libs/${UPGRADE_JAR} /datahub/datahub-upgrade/bin/datahub-upgrade.jar
+COPY --chmod=755 docker/datahub-upgrade/start.sh /datahub/datahub-upgrade/scripts/start.sh
+COPY docker/monitoring/client-prometheus-config.yaml /datahub/datahub-upgrade/scripts/prometheus-config.yaml
+COPY metadata-models/src/main/resources/entity-registry.yml /datahub/datahub-gms/resources/entity-registry.yml
+
+FROM base AS dev-install
 # Dummy stage for development. Assumes code is built on your machine and mounted to this image.
 # See this excellent thread https://github.com/docker/cli/issues/1134
 
-FROM ${APP_ENV}-install as final
-
-RUN addgroup -S datahub && adduser -S datahub -G datahub
+FROM ${APP_ENV}-install AS final
 USER datahub
 
-ENTRYPOINT ["java", "-jar", "/datahub/datahub-upgrade/bin/datahub-upgrade.jar"]
+# application-upgrade.yaml holds health checks, the entity client, and cache defaults.
+# An explicit SPRING_PROFILES_ACTIVE still overrides this image default.
+ENV SPRING_PROFILES_ACTIVE=upgrade
+ENV OTEL_EXPORTER_OTLP_MAX_PAYLOAD_SIZE=4194304 \
+    OTEL_EXPORTER_OTLP_HTTP_HTTP2_MAX_FRAME_SIZE=16777215 \
+    OTEL_EXPORTER_OTLP_HTTP_COMPRESSION=gzip \
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION=gzip
+
+ENTRYPOINT ["/datahub/datahub-upgrade/scripts/start.sh"]

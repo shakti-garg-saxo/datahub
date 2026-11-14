@@ -1,0 +1,25 @@
+namespace com.linkedin.query
+
+import com.linkedin.common.Urn
+
+/**
+ * A single subject of a particular query.
+ * In the future, we may evolve this model to include richer details
+ * about the Query Subject in relation to the query.
+ */
+record QuerySubject {
+  /**
+   * An entity which is the subject of a query.
+   *
+   * Shares the incident `entities` root. Both values are URNs, so this stays
+   * fieldType URN: a KEYWORD here keeps the shared mapping from creating
+   * entities_urn, and active-incident filters then match nothing.
+   * queryByDefault stays false so the URN is not added to unqualified V2 search.
+   */
+  @Searchable = {
+    "fieldName": "entities",
+    "fieldType": "URN",
+    "queryByDefault": false
+  }
+  entity: Urn
+}

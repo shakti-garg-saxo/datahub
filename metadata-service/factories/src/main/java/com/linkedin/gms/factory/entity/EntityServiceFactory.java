@@ -1,36 +1,105 @@
 package com.linkedin.gms.factory.entity;
 
-import com.linkedin.gms.factory.common.TopicConventionFactory;
-import com.linkedin.metadata.dao.producer.EntityKafkaMetadataEventProducer;
+import com.linkedin.datahub.graphql.featureflags.FeatureFlags;
+import com.linkedin.gms.factory.config.ConfigurationProvider;
+import com.linkedin.metadata.config.EntityServiceConfiguration;
+import com.linkedin.metadata.config.PreProcessHooks;
+import com.linkedin.metadata.config.SemanticNoOpConfiguration;
+import com.linkedin.metadata.dao.throttle.ThrottleSensor;
+import com.linkedin.metadata.entity.AspectDao;
 import com.linkedin.metadata.entity.EntityService;
-import com.linkedin.metadata.entity.ebean.EbeanAspectDao;
-import com.linkedin.metadata.entity.ebean.EbeanEntityService;
+import com.linkedin.metadata.entity.EntityServiceImpl;
+import com.linkedin.metadata.entity.ebean.batch.ChangeItemImpl;
+import com.linkedin.metadata.entity.lock.EntityWriteLock;
+import com.linkedin.metadata.entity.retention.buffer.RetentionBuffer;
+import com.linkedin.metadata.entity.semantic.SemanticNoOpComparator;
+import com.linkedin.metadata.event.EventProducer;
 import com.linkedin.metadata.models.registry.EntityRegistry;
-import com.linkedin.mxe.TopicConvention;
+import java.util.List;
 import javax.annotation.Nonnull;
-import org.apache.kafka.clients.producer.Producer;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.ApplicationContext;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.DependsOn;
 
-
+@Slf4j
 @Configuration
 public class EntityServiceFactory {
-  @Autowired
-  ApplicationContext applicationContext;
+
+  @Value("${EBEAN_MAX_TRANSACTION_RETRY:#{null}}")
+  private Integer _ebeanMaxTransactionRetry;
 
   @Bean(name = "entityService")
-  @DependsOn({"ebeanAspectDao", "kafkaEventProducer", TopicConventionFactory.TOPIC_CONVENTION_BEAN, "entityRegistry"})
+  @DependsOn({"entityAspectDao", "kafkaEventProducer"})
   @Nonnull
-  protected EntityService createInstance() {
+  protected EntityService<ChangeItemImpl> createInstance(
+      @Qualifier("kafkaEventProducer") final EventProducer eventProducer,
+      @Qualifier("entityAspectDao") final AspectDao aspectDao,
+      @Qualifier("configurationProvider") ConfigurationProvider configurationProvider,
+      @Value("${featureFlags.showBrowseV2}") final boolean enableBrowsePathV2,
+      @Value("${featureFlags.cdcModeChangeLog}") final boolean enableCDCModeChangeLog,
+      @Value("${entityService.syncIngestStamping:false}") final boolean syncIngestStamping,
+      @Value("${entityService.semanticNoOp.enabled:false}") final boolean semanticNoOpEnabled,
+      @Value("${entityService.semanticNoOp.rulesJson:[]}") final String semanticNoOpRulesJson,
+      @Qualifier("entityRegistry") final EntityRegistry entityRegistry,
+      @Value("${MAE_CONSUMER_ENABLED:false}") final String maeConsumerEnabled,
+      @Value("${MCL_CONSUMER_ENABLED:false}") final String mclConsumerEnabled,
+      final List<ThrottleSensor> throttleSensors,
+      @javax.annotation.Nullable final com.linkedin.metadata.utils.metrics.MetricUtils metricUtils,
+      final ObjectProvider<RetentionBuffer> retentionBufferProvider,
+      final EntityWriteLock entityWriteLock) {
 
-    final EntityKafkaMetadataEventProducer producer =
-        new EntityKafkaMetadataEventProducer(applicationContext.getBean(Producer.class),
-            applicationContext.getBean(TopicConvention.class));
+    FeatureFlags featureFlags = configurationProvider.getFeatureFlags();
+    PreProcessHooks.validateWhenConsumingMcl(
+        featureFlags.getPreProcessHooks(),
+        PreProcessHooks.isMclConsumerEnabled(maeConsumerEnabled, mclConsumerEnabled));
 
-    return new EbeanEntityService(applicationContext.getBean(EbeanAspectDao.class), producer,
-        applicationContext.getBean(EntityRegistry.class));
+    EntityServiceImpl entityService =
+        new EntityServiceImpl(
+            aspectDao,
+            eventProducer,
+            featureFlags.getPreProcessHooks(),
+            new EntityServiceConfiguration()
+                .setAlwaysEmitChangeLog(featureFlags.isAlwaysEmitChangeLog())
+                .setCdcModeChangeLog(featureFlags.isCdcModeChangeLog())
+                .setRetry(_ebeanMaxTransactionRetry)
+                .setEnableBrowseV2(enableBrowsePathV2)
+                .setPostCommitRetentionEnabled(featureFlags.isPostCommitRetentionEnabled())
+                // Without this line the yaml/env value never reaches the service and
+                // stamping is silently dead regardless of DATAHUB_HONOR_SYNC_INGEST_FLAG.
+                .setSyncIngestStamping(syncIngestStamping)
+                .setSemanticNoOp(
+                    new SemanticNoOpConfiguration()
+                        .setEnabled(semanticNoOpEnabled)
+                        .setRulesJson(semanticNoOpRulesJson)),
+            metricUtils);
+    entityService.setSemanticNoOpComparator(
+        SemanticNoOpComparator.compile(
+            semanticNoOpEnabled, semanticNoOpRulesJson, entityRegistry, metricUtils));
+
+    // Absent (NO_OP) unless RetentionBufferFactory activated a coalesce-backed buffer.
+    entityService.setRetentionBuffer(retentionBufferProvider.getIfAvailable());
+
+    // No-op unless entityWriteLockBackend selects a real gate (e.g. Hazelcast).
+    entityService.setEntityWriteLock(entityWriteLock);
+
+    if (throttleSensors != null
+        && !throttleSensors.isEmpty()
+        && configurationProvider
+            .getMetadataChangeProposal()
+            .getThrottle()
+            .getComponents()
+            .getApiRequests()
+            .isEnabled()) {
+      log.info("API Requests Throttle Enabled");
+      throttleSensors.forEach(sensor -> sensor.addCallback(entityService::handleThrottleEvent));
+    } else {
+      log.info("API Requests Throttle Disabled");
+    }
+
+    return entityService;
   }
 }

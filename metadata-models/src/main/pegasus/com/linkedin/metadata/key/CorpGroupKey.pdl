@@ -11,7 +11,21 @@ record CorpGroupKey {
   * The URL-encoded name of the AD/LDAP group. Serves as a globally unique identifier within DataHub.
   */
   @Searchable = {
-    "fieldType": "TEXT_PARTIAL"
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "boostScore": 10.0,
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    },
+    "fieldType": "WORD_GRAM",
+    "queryByDefault": true,
+    "enableAutocomplete": true,
+    "boostScore": 10.0
   }
   name: string
 }

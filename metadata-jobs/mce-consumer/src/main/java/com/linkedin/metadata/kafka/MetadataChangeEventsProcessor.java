@@ -1,60 +1,105 @@
 package com.linkedin.metadata.kafka;
 
-import com.codahale.metrics.Histogram;
-import com.codahale.metrics.MetricRegistry;
 import com.linkedin.entity.Entity;
-import com.linkedin.entity.client.EntityClient;
-import com.linkedin.metadata.Constants;
+import com.linkedin.entity.client.SystemEntityClient;
+import com.linkedin.gms.factory.entityclient.RestliEntityClientFactory;
 import com.linkedin.metadata.EventUtils;
-import com.linkedin.metadata.kafka.config.MetadataChangeProposalProcessorCondition;
+import com.linkedin.metadata.event.EventProducer;
+import com.linkedin.metadata.event.PgQueueEventProducer;
+import com.linkedin.metadata.kafka.config.MetadataChangeEventsProcessorCondition;
 import com.linkedin.metadata.snapshot.Snapshot;
 import com.linkedin.metadata.utils.metrics.MetricUtils;
 import com.linkedin.mxe.FailedMetadataChangeEvent;
 import com.linkedin.mxe.MetadataChangeEvent;
 import com.linkedin.mxe.Topics;
 import com.linkedin.r2.RemoteInvocationException;
+import io.datahubproject.metadata.context.OperationContext;
 import java.io.IOException;
 import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import lombok.NonNull;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.avro.generic.GenericRecord;
-import org.apache.commons.lang.exception.ExceptionUtils;
+import org.apache.avro.generic.IndexedRecord;
+import org.apache.commons.lang3.exception.ExceptionUtils;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.Producer;
+import org.apache.kafka.clients.producer.ProducerRecord;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Conditional;
-import org.springframework.kafka.annotation.EnableKafka;
-import org.springframework.kafka.annotation.KafkaListener;
-import org.springframework.kafka.core.KafkaTemplate;
+import org.springframework.context.annotation.Import;
 import org.springframework.stereotype.Component;
-
 
 @Slf4j
 @Component
-@Conditional(MetadataChangeProposalProcessorCondition.class)
-@EnableKafka
+@Conditional(MetadataChangeEventsProcessorCondition.class)
+@Import({RestliEntityClientFactory.class})
 public class MetadataChangeEventsProcessor {
 
-  private EntityClient entityClient;
-  private KafkaTemplate<String, GenericRecord> kafkaTemplate;
+  @NonNull private final OperationContext systemOperationContext;
+  private final SystemEntityClient entityClient;
+  @Nullable private final Producer<String, IndexedRecord> kafkaProducer;
+  @Nullable private final EventProducer kafkaEventProducer;
 
-  private final Histogram kafkaLagStats =
-      MetricUtils.get().histogram(MetricRegistry.name(this.getClass(), "kafkaLag"));
-
-  @Value("${KAFKA_FMCE_TOPIC_NAME:" + Topics.FAILED_METADATA_CHANGE_EVENT + "}")
+  @Value(
+      "${FAILED_METADATA_CHANGE_EVENT_NAME:${KAFKA_FMCE_TOPIC_NAME:"
+          + Topics.FAILED_METADATA_CHANGE_EVENT
+          + "}}")
   private String fmceTopicName;
 
+  @Value("${METADATA_CHANGE_EVENT_KAFKA_CONSUMER_GROUP_ID:mce-consumer-job-client}")
+  private String mceConsumerGroupId;
+
+  @Autowired
   public MetadataChangeEventsProcessor(
-      @Nonnull final EntityClient entityClient,
-      @Nonnull final KafkaTemplate<String, GenericRecord> kafkaTemplate) {
+      @NonNull OperationContext systemOperationContext,
+      SystemEntityClient entityClient,
+      @Autowired(required = false) @Qualifier("kafkaProducer")
+          Producer<String, IndexedRecord> kafkaProducer,
+      @Autowired(required = false) @Qualifier("kafkaEventProducer")
+          EventProducer kafkaEventProducer) {
+    this.systemOperationContext = systemOperationContext;
     this.entityClient = entityClient;
-    this.kafkaTemplate = kafkaTemplate;
+    this.kafkaProducer = kafkaProducer;
+    this.kafkaEventProducer = kafkaEventProducer;
   }
 
-  @KafkaListener(id = "${METADATA_CHANGE_EVENT_KAFKA_CONSUMER_GROUP_ID:mce-consumer-job-client}", topics =
-      "${KAFKA_MCE_TOPIC_NAME:" + Topics.METADATA_CHANGE_EVENT + "}", containerFactory = "mceKafkaContainerFactory")
+  /**
+   * Used by {@link MetadataChangeEventsKafkaListener} (Kafka only; pgQueue does not consume MCE).
+   */
   public void consume(final ConsumerRecord<String, GenericRecord> consumerRecord) {
-    kafkaLagStats.update(System.currentTimeMillis() - consumerRecord.timestamp());
-    final GenericRecord record = consumerRecord.value();
-    log.debug("Record ", record);
+    InboundMetadataEnvelope<GenericRecord> envelope =
+        InboundMetadataEnvelope.fromKafka(consumerRecord, mceConsumerGroupId);
+    systemOperationContext.withSpan(
+        "consume",
+        () -> {
+          systemOperationContext
+              .getMetricUtils()
+              .ifPresent(
+                  metricUtils ->
+                      MetricUtils.recordInboundMessageQueueLag(
+                          metricUtils,
+                          this.getClass(),
+                          envelope.getLogicalTopic(),
+                          envelope.getConsumerGroupId() != null
+                              ? envelope.getConsumerGroupId()
+                              : mceConsumerGroupId,
+                          envelope.getEnqueuedAtMillis(),
+                          envelope.getMessagingSystem(),
+                          envelope.getPriority()));
+          processGenericRecord(envelope.getPayload(), envelope.getEnqueuedAtMillis());
+        },
+        MetricUtils.DROPWIZARD_NAME,
+        MetricUtils.name(this.getClass(), "consume"));
+  }
+
+  private void processGenericRecord(GenericRecord record, long timestampMillis) {
+    log.info(
+        "Got MCE event (timestamp: {}) value size implied by Avro processing", timestampMillis);
+
+    log.debug("Record {}", record);
 
     MetadataChangeEvent event = new MetadataChangeEvent();
 
@@ -72,31 +117,45 @@ public class MetadataChangeEventsProcessor {
   }
 
   private void sendFailedMCE(@Nonnull MetadataChangeEvent event, @Nonnull Throwable throwable) {
-    final FailedMetadataChangeEvent failedMetadataChangeEvent = createFailedMCEEvent(event, throwable);
+    final FailedMetadataChangeEvent failedMetadataChangeEvent =
+        createFailedMCEEvent(event, throwable);
     try {
-      final GenericRecord genericFailedMCERecord = EventUtils.pegasusToAvroFailedMCE(failedMetadataChangeEvent);
+      final GenericRecord genericFailedMCERecord =
+          EventUtils.pegasusToAvroFailedMCE(failedMetadataChangeEvent);
       log.debug("Sending FailedMessages to topic - {}", fmceTopicName);
-      log.info("Error while processing MCE: FailedMetadataChangeEvent - {}", failedMetadataChangeEvent);
-      this.kafkaTemplate.send(fmceTopicName, genericFailedMCERecord);
+      log.info(
+          "Error while processing MCE: FailedMetadataChangeEvent - {}", failedMetadataChangeEvent);
+      if (kafkaProducer != null) {
+        kafkaProducer.send(new ProducerRecord<>(fmceTopicName, genericFailedMCERecord));
+      } else if (kafkaEventProducer instanceof PgQueueEventProducer pq) {
+        pq.publishRawTopicConfluentAvro(fmceTopicName, "", genericFailedMCERecord, "FMCE");
+      } else {
+        log.error(
+            "Cannot emit FailedMetadataChangeEvent: no kafkaProducer and kafkaEventProducer is not PgQueueEventProducer");
+      }
     } catch (IOException e) {
-      log.error("Error while sending FailedMetadataChangeEvent: Exception  - {}, FailedMetadataChangeEvent - {}",
-          e.getStackTrace(), failedMetadataChangeEvent);
+      log.error(
+          "Error while sending FailedMetadataChangeEvent: Exception  - {}, FailedMetadataChangeEvent - {}",
+          e.getStackTrace(),
+          failedMetadataChangeEvent);
     }
   }
 
   @Nonnull
-  private FailedMetadataChangeEvent createFailedMCEEvent(@Nonnull MetadataChangeEvent event,
-      @Nonnull Throwable throwable) {
+  private FailedMetadataChangeEvent createFailedMCEEvent(
+      @Nonnull MetadataChangeEvent event, @Nonnull Throwable throwable) {
     final FailedMetadataChangeEvent fmce = new FailedMetadataChangeEvent();
     fmce.setError(ExceptionUtils.getStackTrace(throwable));
     fmce.setMetadataChangeEvent(event);
     return fmce;
   }
 
-  private void processProposedSnapshot(@Nonnull MetadataChangeEvent metadataChangeEvent) throws RemoteInvocationException {
+  @Deprecated
+  private void processProposedSnapshot(@Nonnull MetadataChangeEvent metadataChangeEvent)
+      throws RemoteInvocationException {
     final Snapshot snapshotUnion = metadataChangeEvent.getProposedSnapshot();
     final Entity entity = new Entity().setValue(snapshotUnion);
-    // TODO: Get the actor identity from the event header itself.
-    entityClient.updateWithSystemMetadata(entity, metadataChangeEvent.getSystemMetadata(), Constants.SYSTEM_ACTOR);
+    entityClient.updateWithSystemMetadata(
+        systemOperationContext, entity, metadataChangeEvent.getSystemMetadata());
   }
 }

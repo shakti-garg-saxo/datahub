@@ -1,5 +1,5 @@
 import re
-from typing import Any, Dict, ValuesView
+from typing import Any, Dict, Optional, Type, Union
 
 from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     ArrayType,
@@ -7,6 +7,7 @@ from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     BytesType,
     DateType,
     EnumType,
+    MapType,
     NullType,
     NumberType,
     RecordType,
@@ -15,14 +16,28 @@ from datahub.metadata.com.linkedin.pegasus2avro.schema import (
     UnionType,
 )
 
-# these can be obtained by running `select format_type(oid, null),* from pg_type;`
-# we've omitted the types without a meaningful DataHub type (e.g. postgres-specific types, index vectors, etc.)
+DATAHUB_FIELD_TYPE = Union[
+    ArrayType,
+    BooleanType,
+    BytesType,
+    DateType,
+    EnumType,
+    MapType,
+    NullType,
+    NumberType,
+    RecordType,
+    StringType,
+    TimeType,
+    UnionType,
+]
+
+
+# These can be obtained by running `select format_type(oid, null),* from pg_type;`
+# We've omitted the types without a meaningful DataHub type (e.g. postgres-specific types, index vectors, etc.)
 # (run `\copy (select format_type(oid, null),* from pg_type) to 'pg_type.csv' csv header;` to get a CSV)
-
-# we map from format_type since this is what dbt uses
-# see https://github.com/fishtown-analytics/dbt/blob/master/plugins/postgres/dbt/include/postgres/macros/catalog.sql#L22
-
-# see https://www.npgsql.org/dev/types.html for helpful type annotations
+# We map from format_type since this is what dbt uses.
+# See https://github.com/fishtown-analytics/dbt/blob/master/plugins/postgres/dbt/include/postgres/macros/catalog.sql#L22
+# See https://www.npgsql.org/dev/types.html for helpful type annotations
 POSTGRES_TYPES_MAP: Dict[str, Any] = {
     "boolean": BooleanType,
     "bytea": BytesType,
@@ -40,22 +55,22 @@ POSTGRES_TYPES_MAP: Dict[str, Any] = {
     "cid": None,  # object identifier
     "oidvector": None,  # object identifier
     "json": RecordType,
-    "xml": RecordType,
+    "xml": StringType,  # rendered/stored as text; aligned with the postgres source mapping
     "xid8": None,  # object identifier
-    "point": None,  # 2D point
-    "lseg": None,  # line segment
-    "path": None,  # path of points
-    "box": None,  # a pair of corner points
-    "polygon": None,  # closed set of points
-    "line": None,  # infinite line
+    "point": BytesType,  # 2D point (opaque geometric scalar)
+    "lseg": BytesType,  # line segment
+    "path": BytesType,  # path of points
+    "box": BytesType,  # a pair of corner points
+    "polygon": BytesType,  # closed set of points
+    "line": BytesType,  # infinite line
     "real": NumberType,
     "double precision": NumberType,
     "unknown": None,
-    "circle": None,  # circle with center and radius
+    "circle": BytesType,  # circle with center and radius
     "money": NumberType,
     "macaddr": None,  # MAC address
     "inet": None,  # IPv4 or IPv6 host address
-    "cidr": None,  # IPv4 or IPv6 network specification
+    "cidr": StringType,  # IPv4 or IPv6 network specification
     "macaddr8": None,  # MAC address
     "aclitem": None,  # system info
     "character": StringType,
@@ -78,6 +93,7 @@ POSTGRES_TYPES_MAP: Dict[str, Any] = {
     "regtype": None,
     "regrole": None,
     "regnamespace": None,
+    "super": NullType,
     "uuid": StringType,
     "pg_lsn": None,
     "tsvector": None,  # text search vector
@@ -89,12 +105,28 @@ POSTGRES_TYPES_MAP: Dict[str, Any] = {
     "jsonpath": None,  # path to property in a JSON doc
     "txid_snapshot": None,
     "pg_snapshot": None,
-    "int4range": None,  # don't have support for ranges yet
-    "numrange": None,
-    "tsrange": None,
-    "tstzrange": None,
-    "daterange": None,
-    "int8range": None,
+    "int4range": StringType,  # ranges serialize as text, e.g. [1,10)
+    "numrange": StringType,
+    "tsrange": StringType,
+    "tstzrange": StringType,
+    "daterange": StringType,
+    "int8range": StringType,
+    "int4multirange": StringType,
+    "nummultirange": StringType,
+    "tsmultirange": StringType,
+    "tstzmultirange": StringType,
+    "datemultirange": StringType,
+    "int8multirange": StringType,
+    # Extension types (not in pg_type by default); aligned with the postgres
+    # source's SQLAlchemy-level registrations.
+    "citext": StringType,
+    "ltree": StringType,
+    "vector": ArrayType,  # pgvector
+    "halfvec": ArrayType,  # pgvector
+    "sparsevec": ArrayType,  # pgvector
+    "geometry": BytesType,  # PostGIS (WKB on the wire)
+    "geography": BytesType,  # PostGIS
+    "raster": BytesType,  # PostGIS
     "record": RecordType,
     "record[]": ArrayType,
     "cstring": None,
@@ -134,7 +166,7 @@ POSTGRES_TYPES_MAP: Dict[str, Any] = {
     "oidvector[]": ArrayType,
     "json[]": ArrayType,
     "xml[]": ArrayType,
-    "xid8[]": ValuesView,
+    "xid8[]": ArrayType,
     "point[]": ArrayType,
     "lseg[]": ArrayType,
     "path[]": ArrayType,
@@ -216,7 +248,6 @@ POSTGRES_MODIFIED_TYPES = {
 
 
 def resolve_postgres_modified_type(type_string: str) -> Any:
-
     if type_string.endswith("[]"):
         return ArrayType
 
@@ -227,7 +258,44 @@ def resolve_postgres_modified_type(type_string: str) -> Any:
     return None
 
 
-# see https://docs.snowflake.com/en/sql-reference/intro-summary-data-types.html
+def resolve_trino_modified_type(type_string: str) -> Any:
+    # Trino types are conventionally lowercase, but dbt catalogs (e.g. types
+    # rendered from a CAST(... AS DECIMAL(38,2)) in the compiled SQL) may
+    # surface them uppercase, so normalize before lookup.
+    type_string = type_string.lower()
+    # for cases like timestamp(3), decimal(10,0), row(...)
+    match = re.match(r"([a-zA-Z]+)\(.+\)", type_string)
+    if match:
+        modified_type_base: str = match.group(1)
+        return TRINO_SQL_TYPES_MAP.get(modified_type_base)
+    return TRINO_SQL_TYPES_MAP.get(type_string)
+
+
+def resolve_athena_modified_type(type_string: str) -> Any:
+    # for cases like struct<...>, array<...>, map<...>
+    match_complex = re.match(r"([a-zA-Z]+)<.+>", type_string)
+    # for cases like timestamp(3), decimal(10,0)
+    match_simple = re.match(r"([a-zA-Z]+)\(.+\)", type_string)
+
+    modified_type_base = ""
+    if match_complex:
+        modified_type_base = match_complex.group(1)
+    elif match_simple:
+        modified_type_base = match_simple.group(1)
+    if modified_type_base:
+        return ATHENA_SQL_TYPES_MAP[modified_type_base]
+    return ATHENA_SQL_TYPES_MAP[type_string]
+
+
+def resolve_vertica_modified_type(type_string: str) -> Any:
+    # for cases like timestamp(3), decimal(10,0)
+    match = re.match(r"([a-zA-Z ]+)\(.+\)", type_string)
+    if match:
+        modified_type_base: str = match.group(1)
+        return VERTICA_SQL_TYPES_MAP[modified_type_base]
+    return VERTICA_SQL_TYPES_MAP[type_string]
+
+
 SNOWFLAKE_TYPES_MAP: Dict[str, Any] = {
     "NUMBER": NumberType,
     "DECIMAL": NumberType,
@@ -236,6 +304,8 @@ SNOWFLAKE_TYPES_MAP: Dict[str, Any] = {
     "INTEGER": NumberType,
     "BIGINT": NumberType,
     "SMALLINT": NumberType,
+    "TINYINT": NumberType,
+    "BYTEINT": NumberType,
     "FLOAT": NumberType,
     "FLOAT4": NumberType,
     "FLOAT8": NumberType,
@@ -243,6 +313,7 @@ SNOWFLAKE_TYPES_MAP: Dict[str, Any] = {
     "DOUBLE PRECISION": NumberType,
     "REAL": NumberType,
     "VARCHAR": StringType,
+    "CHARACTER VARYING": StringType,
     "CHAR": StringType,
     "CHARACTER": StringType,
     "STRING": StringType,
@@ -263,7 +334,19 @@ SNOWFLAKE_TYPES_MAP: Dict[str, Any] = {
     "GEOGRAPHY": None,
 }
 
-# see https://github.com/googleapis/python-bigquery-sqlalchemy/blob/master/pybigquery/sqlalchemy_bigquery.py#L111
+
+def resolve_snowflake_modified_type(type_string: str) -> Any:
+    # Match types with precision and scale, e.g., 'DECIMAL(38,0)' or TIME(3)
+    match = re.match(r"([a-z A-Z_]+)\(\d+(,(\s+)?\d+)?\)", type_string)
+    if match:
+        modified_type_base = match.group(1)  # Extract the base type
+        return SNOWFLAKE_TYPES_MAP.get(modified_type_base)
+
+    # Fallback for types without precision/scale
+    return SNOWFLAKE_TYPES_MAP.get(type_string)
+
+
+# see https://github.com/googleapis/python-bigquery-sqlalchemy/blob/main/sqlalchemy_bigquery/_types.py#L32
 BIGQUERY_TYPES_MAP: Dict[str, Any] = {
     "STRING": StringType,
     "BOOL": BooleanType,
@@ -282,3 +365,291 @@ BIGQUERY_TYPES_MAP: Dict[str, Any] = {
     "BIGNUMERIC": NumberType,
     "GEOGRAPHY": None,
 }
+
+# see https://spark.apache.org/docs/latest/sql-ref-datatypes.html
+SPARK_SQL_TYPES_MAP: Dict[str, Any] = {
+    "boolean": BooleanType,
+    "byte": NumberType,
+    "tinyint": NumberType,
+    "short": NumberType,
+    "smallint": NumberType,
+    "int": NumberType,
+    "integer": NumberType,
+    "long": NumberType,
+    "bigint": NumberType,
+    "float": NumberType,
+    "real": NumberType,
+    "double": NumberType,
+    "date": DateType,
+    "timestamp": TimeType,
+    "string": StringType,
+    "binary": BytesType,
+    "decimal": NumberType,
+    "dec": NumberType,
+    "numeric": NumberType,
+    "array": ArrayType,
+    "struct": RecordType,
+    "map": RecordType,
+}
+
+# https://trino.io/docs/current/language/types.html
+# https://github.com/trinodb/trino-python-client/blob/master/trino/sqlalchemy/datatype.py#L75
+TRINO_SQL_TYPES_MAP: Dict[str, Any] = {
+    "boolean": BooleanType,
+    "tinyint": NumberType,
+    "smallint": NumberType,
+    "int": NumberType,
+    "integer": NumberType,
+    "bigint": NumberType,
+    "real": NumberType,
+    "double": NumberType,
+    "decimal": NumberType,
+    "varchar": StringType,
+    "char": StringType,
+    "varbinary": BytesType,
+    "date": DateType,
+    "time": TimeType,
+    "timestamp": TimeType,
+    "row": RecordType,
+    "map": MapType,
+    "array": ArrayType,
+    "json": RecordType,
+}
+
+# https://docs.aws.amazon.com/athena/latest/ug/data-types.html
+# https://github.com/dbt-athena/dbt-athena/tree/main
+ATHENA_SQL_TYPES_MAP: Dict[str, Any] = {
+    "boolean": BooleanType,
+    "tinyint": NumberType,
+    "smallint": NumberType,
+    "int": NumberType,
+    "integer": NumberType,
+    "bigint": NumberType,
+    "float": NumberType,
+    "double": NumberType,
+    "decimal": NumberType,
+    "varchar": StringType,
+    "char": StringType,
+    "binary": BytesType,
+    "date": DateType,
+    "timestamp": TimeType,
+    "struct": RecordType,
+    "map": MapType,
+    "array": ArrayType,
+    "row": RecordType,
+}
+
+# https://www.vertica.com/docs/11.1.x/HTML/Content/Authoring/SQLReferenceManual/DataTypes/SQLDataTypes.htm
+VERTICA_SQL_TYPES_MAP: Dict[str, Any] = {
+    "binary": BytesType,
+    "varbinary": BytesType,
+    "long varbinary": BytesType,
+    "bytea": BytesType,
+    "raw": BytesType,
+    "boolean": BooleanType,
+    "char": StringType,
+    "varchar": StringType,
+    "long varchar": StringType,
+    "date": DateType,
+    "time": TimeType,
+    "datetime": TimeType,
+    "smalldatetime": TimeType,
+    "time with timezone": TimeType,
+    "timestamp": TimeType,
+    "timestamptz": TimeType,
+    "timestamp with timezone": TimeType,
+    "interval": TimeType,
+    "interval hour to second": TimeType,
+    "double precision": NumberType,
+    "float": NumberType,
+    "float8": NumberType,
+    "real": NumberType,
+    "integer": NumberType,
+    "int": NumberType,
+    "bigint": NumberType,
+    "int8": NumberType,
+    "smallint": NumberType,
+    "tinyint": NumberType,
+    "decimal": NumberType,
+    "numeric": NumberType,
+    "number": NumberType,
+    "money": NumberType,
+    "geometry": None,
+    "geography": None,
+    "uuid": StringType,
+}
+
+# Neo4j property types mapping
+# https://neo4j.com/docs/cypher-manual/current/values-and-types/property-structural-constructed/
+NEO4J_TYPES_MAP: Dict[str, Any] = {
+    "boolean": BooleanType,
+    "date": DateType,
+    "duration": TimeType,  # Neo4j duration represents a temporal amount
+    "float": NumberType,
+    "integer": NumberType,
+    "list": ArrayType,
+    "local_date_time": TimeType,
+    "local_time": TimeType,
+    "point": StringType,  # Neo4j point - spatial coordinate, represented as string
+    "string": StringType,
+    "zoned_date_time": TimeType,
+    "zoned_time": TimeType,
+    "node": StringType,  # Neo4j object type
+    "relationship": StringType,  # Neo4j object type
+}
+
+# Google Dataplex type mapping
+# https://cloud.google.com/dataplex/docs/reference/rest/v1/projects.locations.lakes.zones.entities#Schema.Type
+DATAPLEX_TYPES_MAP: Dict[str, Any] = {
+    "BOOL": BooleanType,
+    "BYTE": BytesType,
+    "INT16": NumberType,
+    "INT32": NumberType,
+    "INT64": NumberType,
+    "FLOAT": NumberType,
+    "DOUBLE": NumberType,
+    "DECIMAL": NumberType,
+    "STRING": StringType,
+    "BINARY": BytesType,
+    "TIMESTAMP": TimeType,
+    "DATE": DateType,
+    "TIME": TimeType,
+    "RECORD": RecordType,
+    "NULL": NullType,
+}
+
+# SQL Server / Microsoft Fabric SQL Analytics Endpoint type mapping
+# https://learn.microsoft.com/en-us/sql/t-sql/data-types/data-types-transact-sql
+# Note: While SQL Server types are case-insensitive in general, Fabric OneLake's SQL Analytics
+# Endpoint INFORMATION_SCHEMA.COLUMNS returns uppercase type names (e.g., "VARCHAR", "INT").
+# We include both uppercase and lowercase variants because:
+# 1. OneLake's INFORMATION_SCHEMA returns uppercase, so we need uppercase variants for direct lookup
+# 2. The merged mapping is shared across platforms, and some may use lowercase
+# 3. resolve_sql_type() does case-sensitive dictionary lookup (no normalization)
+# 4. Having both ensures compatibility regardless of how the type string is provided
+SQL_SERVER_TYPES_MAP: Dict[str, Any] = {
+    # Numeric types
+    "int": NumberType,
+    "bigint": NumberType,
+    "smallint": NumberType,
+    "tinyint": NumberType,
+    "decimal": NumberType,
+    "numeric": NumberType,
+    "float": NumberType,
+    "real": NumberType,
+    "money": NumberType,
+    "smallmoney": NumberType,
+    # String types
+    "varchar": StringType,
+    "nvarchar": StringType,
+    "char": StringType,
+    "nchar": StringType,
+    "text": StringType,
+    "ntext": StringType,
+    # Binary types
+    "binary": BytesType,
+    "varbinary": BytesType,
+    "image": BytesType,
+    # Date/Time types
+    "date": DateType,
+    "time": TimeType,
+    "datetime": TimeType,
+    "datetime2": TimeType,
+    "smalldatetime": TimeType,
+    "datetimeoffset": TimeType,
+    "timestamp": BytesType,  # SQL Server timestamp is a binary type, not a datetime
+    # Other types
+    "bit": BooleanType,
+    "uniqueidentifier": StringType,
+    "xml": RecordType,
+    "json": RecordType,
+    "sql_variant": RecordType,  # Variant type, map to RecordType
+    # Uppercase variants (INFORMATION_SCHEMA returns uppercase)
+    "INT": NumberType,
+    "BIGINT": NumberType,
+    "SMALLINT": NumberType,
+    "TINYINT": NumberType,
+    "DECIMAL": NumberType,
+    "NUMERIC": NumberType,
+    "FLOAT": NumberType,
+    "REAL": NumberType,
+    "MONEY": NumberType,
+    "SMALLMONEY": NumberType,
+    "VARCHAR": StringType,
+    "NVARCHAR": StringType,
+    "CHAR": StringType,
+    "NCHAR": StringType,
+    "TEXT": StringType,
+    "NTEXT": StringType,
+    "BINARY": BytesType,
+    "VARBINARY": BytesType,
+    "IMAGE": BytesType,
+    "DATE": DateType,
+    "TIME": TimeType,
+    "DATETIME": TimeType,
+    "DATETIME2": TimeType,
+    "SMALLDATETIME": TimeType,
+    "DATETIMEOFFSET": TimeType,
+    "TIMESTAMP": BytesType,
+    "BIT": BooleanType,
+    "UNIQUEIDENTIFIER": StringType,
+    "XML": RecordType,
+    "JSON": RecordType,
+    "SQL_VARIANT": RecordType,
+}
+
+
+_merged_mapping = {
+    "boolean": BooleanType,
+    "date": DateType,
+    "time": TimeType,
+    "numeric": NumberType,
+    "text": StringType,
+    "timestamp with time zone": DateType,
+    "timestamp without time zone": DateType,
+    "integer": NumberType,
+    "float8": NumberType,
+    "struct": RecordType,
+    **POSTGRES_TYPES_MAP,
+    **SNOWFLAKE_TYPES_MAP,
+    **BIGQUERY_TYPES_MAP,
+    **SPARK_SQL_TYPES_MAP,
+    **TRINO_SQL_TYPES_MAP,
+    **ATHENA_SQL_TYPES_MAP,
+    **VERTICA_SQL_TYPES_MAP,
+    **NEO4J_TYPES_MAP,
+    **DATAPLEX_TYPES_MAP,
+    **SQL_SERVER_TYPES_MAP,
+}
+
+
+def resolve_sql_type(
+    column_type: Optional[str],
+    platform: Optional[str] = None,
+) -> Optional[DATAHUB_FIELD_TYPE]:
+    # In theory, we should use the platform-specific mapping where available.
+    # However, the types don't ever conflict, so the merged mapping is fine.
+    # Wrong assumption - there ARE conflicts as the test_type_conflicts_across_platforms in test_sql_types.py shows.
+    # TODO: revisit this and make platform-specific mappings work.
+    TypeClass: Optional[Type[DATAHUB_FIELD_TYPE]] = (
+        _merged_mapping.get(column_type) if column_type else None
+    )
+
+    if TypeClass is None and column_type:
+        # resolve a modified type
+        if platform == "trino":
+            TypeClass = resolve_trino_modified_type(column_type)
+        elif platform == "athena":
+            TypeClass = resolve_athena_modified_type(column_type)
+        elif platform == "postgres" or platform == "redshift":
+            # Redshift uses a variant of Postgres, so we can use the same logic.
+            TypeClass = resolve_postgres_modified_type(column_type)
+        elif platform == "vertica":
+            TypeClass = resolve_vertica_modified_type(column_type)
+        elif platform == "snowflake":
+            # Snowflake types are uppercase, so we check that.
+            TypeClass = resolve_snowflake_modified_type(column_type.upper())
+
+    if TypeClass:
+        return TypeClass()
+    return None

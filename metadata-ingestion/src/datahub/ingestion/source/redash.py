@@ -1,41 +1,57 @@
-import importlib
 import logging
 import math
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Optional, Type
+from typing import Dict, Iterable, List, Optional
 
 import dateutil.parser as dp
+from packaging import version
+from pydantic import SecretStr
+from pydantic.fields import Field
 from redash_toolbelt import Redash
 from requests.adapters import HTTPAdapter
-from requests.packages.urllib3.util.retry import Retry
+from urllib3.util.retry import Retry
 
 import datahub.emitter.mce_builder as builder
-from datahub.configuration.common import AllowDenyPattern, ConfigModel
+from datahub.configuration.common import AllowDenyPattern, TransparentSecretStr
 from datahub.emitter.mce_builder import DEFAULT_ENV
+from datahub.emitter.mcp import MetadataChangeProposalWrapper
 from datahub.ingestion.api.common import PipelineContext
-from datahub.ingestion.api.source import Source, SourceReport
+from datahub.ingestion.api.decorators import (  # SourceCapability,; capability,
+    SupportStatus,
+    capability,
+    config_class,
+    platform_name,
+    support_status,
+)
+from datahub.ingestion.api.source import (
+    SourceCapability,
+    SourceReport,
+)
 from datahub.ingestion.api.workunit import MetadataWorkUnit
+from datahub.ingestion.source.state.stale_entity_removal_handler import (
+    StaleEntityRemovalSourceReport,
+)
+from datahub.ingestion.source.state.stateful_ingestion_base import (
+    StatefulIngestionConfigBase,
+    StatefulIngestionSourceBase,
+)
 from datahub.metadata.com.linkedin.pegasus2avro.common import (
     AuditStamp,
     ChangeAuditStamps,
 )
-from datahub.metadata.com.linkedin.pegasus2avro.metadata.snapshot import (
-    ChartSnapshot,
-    DashboardSnapshot,
-)
-from datahub.metadata.com.linkedin.pegasus2avro.mxe import MetadataChangeEvent
 from datahub.metadata.schema_classes import (
     ChartInfoClass,
     ChartTypeClass,
     DashboardInfoClass,
 )
-from datahub.utilities.sql_parser import SQLParser
+from datahub.sql_parsing.sqlglot_lineage import create_lineage_sql_parsed_result
+from datahub.utilities.lossy_collections import LossyDict, LossyList, LossySet
+from datahub.utilities.perf_timer import PerfTimer
+from datahub.utilities.threaded_iterator_executor import ThreadedIteratorExecutor
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
-
-PAGE_SIZE = 25
 
 DEFAULT_DATA_SOURCE_PLATFORM = "external"
 DEFAULT_DATA_BASE_NAME = "default"
@@ -76,6 +92,7 @@ REDASH_DATA_SOURCE_TO_DATAHUB_MAP = {
     "results": {"platform": "external", "db_name_key": "name"},
 }
 
+REDASH_VERSION_V9 = "9.0.0-beta"
 
 # We assume the default chart type is TABLE
 DEFAULT_VISUALIZATION_TYPE = ChartTypeClass.TABLE
@@ -123,7 +140,9 @@ class QualifiedNameParser:
     def get_segments(self, table_name: str) -> Dict:
         segments = table_name.split(self.split_char)
         segments.reverse()
-        self.segments_dict = dict(zip(list(reversed(self.names)), segments))
+        self.segments_dict = dict(
+            zip(list(reversed(self.names)), segments, strict=False)
+        )
         return self.segments_dict
 
     def get_full_qualified_name(self, database_name: str, table_name: str) -> str:
@@ -167,6 +186,18 @@ class MysqlQualifiedNameParser(QualifiedNameParser):
 
 
 @dataclass
+class AthenaQualifiedNameParser(QualifiedNameParser):
+    split_char: str = "."
+    names: List = field(default_factory=lambda: ["database_name", "table_name"])
+
+    def get_full_qualified_name(self, database_name: str, table_name: str) -> str:
+        self.get_segments(table_name)
+        _database_name = self.segments_dict.get("database_name") or database_name
+        _table_name = self.segments_dict.get("table_name")
+        return f"{_database_name}{self.split_char}{_table_name}"
+
+
+@dataclass
 class BigqueryQualifiedNameParser(QualifiedNameParser):
     split_char: str = "."
     names: List = field(
@@ -176,54 +207,105 @@ class BigqueryQualifiedNameParser(QualifiedNameParser):
     def get_full_qualified_name(self, database_name: str, table_name: str) -> str:
         self.get_segments(table_name)
         _database_name = self.segments_dict.get("database_name") or database_name
-        _schema_name = self.segments_dict.get("schema_name")
-        _table_name = self.segments_dict.get("table_name")
+        # We want to throw error if either of these is None
+        _schema_name = self.segments_dict["schema_name"]
+        _table_name = self.segments_dict["table_name"]
 
         return f"{_database_name}{self.split_char}{_schema_name}{self.split_char}{_table_name}"
 
 
 def get_full_qualified_name(platform: str, database_name: str, table_name: str) -> str:
-    if platform == "postgres":
-        full_qualified_name = PostgresQualifiedNameParser().get_full_qualified_name(
+    if platform == "athena":
+        return AthenaQualifiedNameParser().get_full_qualified_name(
             database_name, table_name
         )
-    elif platform == "mysql":
-        full_qualified_name = MysqlQualifiedNameParser().get_full_qualified_name(
-            database_name, table_name
-        )
-    elif platform == "mssql":
-        full_qualified_name = MssqlQualifiedNameParser().get_full_qualified_name(
-            database_name, table_name
-        )
+
     elif platform == "bigquery":
-        full_qualified_name = BigqueryQualifiedNameParser().get_full_qualified_name(
+        return BigqueryQualifiedNameParser().get_full_qualified_name(
             database_name, table_name
         )
+
+    elif platform == "mssql":
+        return MssqlQualifiedNameParser().get_full_qualified_name(
+            database_name, table_name
+        )
+
+    elif platform == "mysql":
+        return MysqlQualifiedNameParser().get_full_qualified_name(
+            database_name, table_name
+        )
+
+    elif platform == "postgres":
+        return PostgresQualifiedNameParser().get_full_qualified_name(
+            database_name, table_name
+        )
+
     else:
-        full_qualified_name = f"{database_name}.{table_name}"
-    return full_qualified_name
+        return f"{database_name}.{table_name}"
 
 
-class RedashConfig(ConfigModel):
+class RedashConfig(
+    StatefulIngestionConfigBase,
+):
     # See the Redash API for details
     # https://redash.io/help/user-guide/integrations-and-api/api
-    connect_uri: str = "http://localhost:5000"
-    api_key: str = "REDASH_API_KEY"
-    env: str = DEFAULT_ENV
+    connect_uri: str = Field(
+        default="http://localhost:5000", description="Redash base URL."
+    )
+    api_key: TransparentSecretStr = Field(
+        default=SecretStr("REDASH_API_KEY"), description="Redash user API key."
+    )
 
     # Optionals
-    dashboard_patterns: AllowDenyPattern = AllowDenyPattern.allow_all()
-    chart_patterns: AllowDenyPattern = AllowDenyPattern.allow_all()
-    skip_draft: bool = True
-    api_page_limit: int = sys.maxsize
-    parse_table_names_from_sql: bool = False
-    sql_parser: str = "datahub.utilities.sql_parser.DefaultSQLParser"
+    dashboard_patterns: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="regex patterns for dashboards to filter for ingestion.",
+    )
+    chart_patterns: AllowDenyPattern = Field(
+        default=AllowDenyPattern.allow_all(),
+        description="regex patterns for charts to filter for ingestion.",
+    )
+    skip_draft: bool = Field(
+        default=True, description="Only ingest published dashboards and charts."
+    )
+    page_size: int = Field(
+        default=25, description="Limit on number of items to be queried at once."
+    )
+    api_page_limit: int = Field(
+        default=sys.maxsize,
+        description="Limit on number of pages queried for ingesting dashboards and charts API during pagination.",
+    )
+    parallelism: int = Field(
+        default=1,
+        description="Parallelism to use while processing.",
+    )
+    parse_table_names_from_sql: bool = Field(
+        default=False, description="See note below."
+    )
+
+    env: str = Field(
+        default=DEFAULT_ENV,
+        description="Environment to use in namespace when constructing URNs.",
+    )
 
 
 @dataclass
-class RedashSourceReport(SourceReport):
+class RedashSourceReport(StaleEntityRemovalSourceReport):
     items_scanned: int = 0
-    filtered: List[str] = field(default_factory=list)
+    filtered: LossyList[str] = field(default_factory=LossyList)
+    queries_problem_parsing: LossySet[str] = field(default_factory=LossySet)
+    queries_no_dataset: LossySet[str] = field(default_factory=LossySet)
+    charts_no_input: LossySet[str] = field(default_factory=LossySet)
+    total_queries: Optional[int] = field(
+        default=None,
+    )
+    max_page_queries: Optional[int] = field(default=None)
+    total_dashboards: Optional[int] = field(
+        default=None,
+    )
+    max_page_dashboards: Optional[int] = field(default=None)
+    api_page_limit: Optional[float] = field(default=None)
+    timing: LossyDict[str, int] = field(default_factory=LossyDict)
 
     def report_item_scanned(self) -> None:
         self.items_scanned += 1
@@ -232,20 +314,32 @@ class RedashSourceReport(SourceReport):
         self.filtered.append(item)
 
 
-class RedashSource(Source):
-    config: RedashConfig
-    report: RedashSourceReport
+@platform_name("Redash")
+@config_class(RedashConfig)
+@support_status(SupportStatus.BETA)
+@capability(SourceCapability.LINEAGE_COARSE, "Enabled by default")
+class RedashSource(StatefulIngestionSourceBase):
+    """
+    This plugin extracts the following:
+
+    - Redash dashboards and queries/visualization
+    - Redash chart table lineages (disabled by default)
+    """
+
     platform = "redash"
 
     def __init__(self, ctx: PipelineContext, config: RedashConfig):
-        super().__init__(ctx)
-        self.config = config
-        self.report = RedashSourceReport()
+        super().__init__(config, ctx)
+        self.config: RedashConfig = config
+        self.ctx = ctx
+        self.report: RedashSourceReport = RedashSourceReport()
 
         # Handle trailing slash removal
         self.config.connect_uri = self.config.connect_uri.strip("/")
 
-        self.client = Redash(self.config.connect_uri, self.config.api_key)
+        self.client = Redash(
+            self.config.connect_uri, self.config.api_key.get_secret_value()
+        )
         self.client.session.headers.update(
             {
                 "Content-Type": "application/json",
@@ -271,51 +365,27 @@ class RedashSource(Source):
         self.api_page_limit = self.config.api_page_limit or math.inf
 
         self.parse_table_names_from_sql = self.config.parse_table_names_from_sql
-        self.sql_parser_path = self.config.sql_parser
 
         logger.info(
             f"Running Redash ingestion with parse_table_names_from_sql={self.parse_table_names_from_sql}"
         )
 
-    def test_connection(self) -> None:
+    def error(self, log: logging.Logger, key: str, reason: str) -> None:
+        # TODO: Remove this method.
+        self.report.failure(message=reason, context=key)
+
+    def warn(self, log: logging.Logger, key: str, reason: str) -> None:
+        # TODO: Remove this method.
+        self.report.warning(message=reason, context=key)
+
+    def validate_connection(self) -> None:
         test_response = self.client._get(f"{self.config.connect_uri}/api")
         if test_response.status_code == 200:
             logger.info("Redash API connected succesfully")
-            pass
         else:
             raise ValueError(f"Failed to connect to {self.config.connect_uri}/api")
 
-    @classmethod
-    def create(cls, config_dict: dict, ctx: PipelineContext) -> Source:
-        config = RedashConfig.parse_obj(config_dict)
-        return cls(ctx, config)
-
-    @classmethod
-    def _import_sql_parser_cls(cls, sql_parser_path: str) -> Type[SQLParser]:
-        assert "." in sql_parser_path, "sql_parser-path must contain a ."
-        module_name, cls_name = sql_parser_path.rsplit(".", 1)
-        import sys
-
-        logger.debug(sys.path)
-        parser_cls = getattr(importlib.import_module(module_name), cls_name)
-        if not issubclass(parser_cls, SQLParser):
-            raise ValueError(f"must be derived from {SQLParser}; got {parser_cls}")
-
-        return parser_cls
-
-    @classmethod
-    def _get_sql_table_names(cls, sql: str, sql_parser_path: str) -> List[str]:
-        parser_cls = cls._import_sql_parser_cls(sql_parser_path)
-
-        sql_table_names: List[str] = parser_cls(sql).get_tables()
-
-        # Remove quotes from table names
-        sql_table_names = [t.replace('"', "") for t in sql_table_names]
-        sql_table_names = [t.replace("`", "") for t in sql_table_names]
-
-        return sql_table_names
-
-    def _get_chart_data_source(self, data_source_id: int = None) -> Dict:
+    def _get_chart_data_source(self, data_source_id: Optional[int] = None) -> Dict:
         url = f"/api/data_sources/{data_source_id}"
         resp = self.client._get(url).json()
         logger.debug(resp)
@@ -327,8 +397,7 @@ class RedashSource(Source):
             map = REDASH_DATA_SOURCE_TO_DATAHUB_MAP.get(
                 data_source_type, {"platform": DEFAULT_DATA_SOURCE_PLATFORM}
             )
-            platform = map.get("platform", DEFAULT_DATA_SOURCE_PLATFORM)
-            return platform
+            return map.get("platform", DEFAULT_DATA_SOURCE_PLATFORM)
         return DEFAULT_DATA_SOURCE_PLATFORM
 
     def _get_database_name_based_on_datasource(
@@ -352,42 +421,39 @@ class RedashSource(Source):
 
         return database_name
 
-    def _construct_datalineage_urn(
-        self, platform: str, database_name: str, sql_table_name: str
-    ) -> str:
-        full_dataset_name = get_full_qualified_name(
-            platform, database_name, sql_table_name
-        )
-        return builder.make_dataset_urn(platform, full_dataset_name, self.config.env)
-
     def _get_datasource_urns(
-        self, data_source: Dict, sql_query_data: Dict = {}
+        self, data_source: Dict, sql_query_data: Optional[Dict] = None
     ) -> Optional[List[str]]:
+        sql_query_data = sql_query_data or {}
         platform = self._get_platform_based_on_datasource(data_source)
         database_name = self._get_database_name_based_on_datasource(data_source)
         data_source_syntax = data_source.get("syntax")
+        data_source_id = data_source.get("id")
+        query_id = sql_query_data.get("id")
 
         if database_name:
             query = sql_query_data.get("query", "")
 
             # Getting table lineage from SQL parsing
             if self.parse_table_names_from_sql and data_source_syntax == "sql":
-                try:
-                    dataset_urns = list()
-                    sql_table_names = self._get_sql_table_names(
-                        query, self.sql_parser_path
-                    )
-                    for sql_table_name in sql_table_names:
-                        dataset_urns.append(
-                            self._construct_datalineage_urn(
-                                platform, database_name, sql_table_name
-                            )
-                        )
-                except Exception as e:
-                    logger.error(e)
-                    logger.error(query)
-
+                dataset_urns = list()
+                sql_parser_in_tables = create_lineage_sql_parsed_result(
+                    query=query,
+                    platform=platform,
+                    env=self.config.env,
+                    platform_instance=None,
+                    default_db=database_name,
+                )
                 # make sure dataset_urns is not empty list
+                dataset_urns = sql_parser_in_tables.in_tables
+                if sql_parser_in_tables.debug_info.table_error:
+                    self.report.queries_problem_parsing.add(str(query_id))
+                    self.warn(
+                        logger,
+                        "sql-parsing",
+                        f"exception {sql_parser_in_tables.debug_info.table_error} in parsing query-{query_id}-datasource-{data_source_id}",
+                    )
+
                 return dataset_urns if len(dataset_urns) > 0 else None
 
             else:
@@ -438,14 +504,9 @@ class RedashSource(Source):
 
         return chart_urns
 
-    def _get_dashboard_snapshot(self, dashboard_data):
-        dashboard_id = dashboard_data["id"]
-        dashboard_urn = f"urn:li:dashboard:({self.platform},{dashboard_id})"
-        dashboard_snapshot = DashboardSnapshot(
-            urn=dashboard_urn,
-            aspects=[],
-        )
-
+    def _build_dashboard_info(
+        self, dashboard_data: Dict, redash_version: str
+    ) -> DashboardInfoClass:
         modified_actor = f"urn:li:corpuser:{dashboard_data.get('changed_by', {}).get('username', 'unknown')}"
         modified_ts = int(
             dp.parse(dashboard_data.get("updated_at", "now")).timestamp() * 1000
@@ -453,19 +514,24 @@ class RedashSource(Source):
         title = dashboard_data.get("name", "")
 
         last_modified = ChangeAuditStamps(
-            created=AuditStamp(time=modified_ts, actor=modified_actor),
+            created=None,
             lastModified=AuditStamp(time=modified_ts, actor=modified_actor),
         )
 
-        dashboard_url = (
-            f"{self.config.connect_uri}/dashboard/{dashboard_data.get('slug', '')}"
-        )
+        if version.parse(redash_version) > version.parse(REDASH_VERSION_V9):
+            dashboard_url = (
+                f"{self.config.connect_uri}/dashboards/{dashboard_data.get('id')}"
+            )
+        else:
+            dashboard_url = (
+                f"{self.config.connect_uri}/dashboard/{dashboard_data.get('slug', '')}"
+            )
 
         widgets = dashboard_data.get("widgets", [])
         description = self._get_dashboard_description_from_widgets(widgets)
         chart_urns = self._get_dashboard_chart_urns_from_widgets(widgets)
 
-        dashboard_info = DashboardInfoClass(
+        return DashboardInfoClass(
             description=description,
             title=title,
             charts=chart_urns,
@@ -473,53 +539,70 @@ class RedashSource(Source):
             dashboardUrl=dashboard_url,
             customProperties={},
         )
-        dashboard_snapshot.aspects.append(dashboard_info)
 
-        return dashboard_snapshot
-
-    def _emit_dashboard_mces(self) -> Iterable[MetadataWorkUnit]:
-        current_dashboards_page = 1
-        skip_draft = self.config.skip_draft
-
-        # Get total number of dashboards to calculate maximum page number
-        dashboards_response = self.client.dashboards(1, PAGE_SIZE)
-        total_dashboards = dashboards_response["count"]
-        max_page = total_dashboards // PAGE_SIZE
-
-        while (
-            current_dashboards_page <= max_page
-            and current_dashboards_page <= self.api_page_limit
-        ):
+    def _process_dashboard_response(
+        self, current_page: int
+    ) -> Iterable[MetadataWorkUnit]:
+        logger.info(f"Starting processing dashboard for page {current_page}")
+        if current_page > self.api_page_limit:
+            logger.info(f"{current_page} > {self.api_page_limit} so returning")
+            return
+        with PerfTimer() as timer:
             dashboards_response = self.client.dashboards(
-                page=current_dashboards_page, page_size=PAGE_SIZE
+                page=current_page, page_size=self.config.page_size
             )
-
-            logger.info(f"/api/dashboards on page {current_dashboards_page}")
-
-            current_dashboards_page += 1
-
             for dashboard_response in dashboards_response["results"]:
-
                 dashboard_name = dashboard_response["name"]
-
                 self.report.report_item_scanned()
-
                 if (not self.config.dashboard_patterns.allowed(dashboard_name)) or (
-                    skip_draft and dashboard_response["is_draft"]
+                    self.config.skip_draft and dashboard_response["is_draft"]
                 ):
                     self.report.report_dropped(dashboard_name)
                     continue
+                try:
+                    # This is undocumented but checking the Redash source
+                    # the API is id based not slug based
+                    # Tested the same with a Redash instance
+                    dashboard_id = dashboard_response["id"]
+                    dashboard_data = self.client._get(
+                        f"api/dashboards/{dashboard_id}"
+                    ).json()
+                except Exception:
+                    # This does not work in our testing but keeping for now because
+                    # people in community are using Redash connector successfully
+                    dashboard_slug = dashboard_response["slug"]
+                    dashboard_data = self.client.dashboard(dashboard_slug)
+                try:
+                    redash_version = self.client._get("status.json").json()["version"]
+                except Exception:
+                    redash_version = REDASH_VERSION_V9
 
-                # Continue producing MCE
-                dashboard_slug = dashboard_response["slug"]
-                dashboard_data = self.client.dashboard(dashboard_slug)
                 logger.debug(dashboard_data)
-                dashboard_snapshot = self._get_dashboard_snapshot(dashboard_data)
-                mce = MetadataChangeEvent(proposedSnapshot=dashboard_snapshot)
-                wu = MetadataWorkUnit(id=dashboard_snapshot.urn, mce=mce)
-                self.report.report_workunit(wu)
+                yield MetadataChangeProposalWrapper(
+                    entityUrn=f"urn:li:dashboard:({self.platform},{dashboard_data['id']})",
+                    aspect=self._build_dashboard_info(dashboard_data, redash_version),
+                ).as_workunit()
 
-                yield wu
+            self.report.timing[f"dashboard-{current_page}"] = int(
+                timer.elapsed_seconds()
+            )
+
+    def _gen_dashboard_workunits(self) -> Iterable[MetadataWorkUnit]:
+        # Get total number of dashboards to calculate maximum page number
+        dashboards_response = self.client.dashboards(1, self.config.page_size)
+        total_dashboards = dashboards_response["count"]
+        max_page = math.ceil(total_dashboards / self.config.page_size)
+        logger.info(
+            f"/api/dashboards total count {total_dashboards} and max page {max_page}"
+        )
+        self.report.total_dashboards = total_dashboards
+        self.report.max_page_dashboards = max_page
+
+        yield from ThreadedIteratorExecutor.process(
+            self._process_dashboard_response,
+            [(page,) for page in range(1, max_page + 1)],
+            max_workers=self.config.parallelism,
+        )
 
     def _get_chart_type_from_viz_data(self, viz_data: Dict) -> str:
         """
@@ -530,7 +613,7 @@ class RedashSource(Source):
         viz_type = viz_data.get("type", "")
         viz_options = viz_data.get("options", {})
         globalSeriesType = viz_options.get("globalSeriesType", "")
-        report_key = f"redash-chart-{viz_data['id']}"
+        report_type = f"redash-chart-{viz_data['id']}"
 
         # handle Plotly chart types
         if viz_type == "CHART":
@@ -538,25 +621,21 @@ class RedashSource(Source):
             if chart_type is None:
                 chart_type = DEFAULT_VISUALIZATION_TYPE
                 message = f"ChartTypeClass for Redash Visualization Type={viz_type} with options.globalSeriesType={globalSeriesType} is missing. Setting to {DEFAULT_VISUALIZATION_TYPE}"
-                self.report.report_warning(key=report_key, reason=message)
+                self.report.warning(title=report_type, message=message, log=False)
                 logger.warning(message)
         else:
             chart_type = VISUALIZATION_TYPE_MAP.get(viz_type)
             if chart_type is None:
                 chart_type = DEFAULT_VISUALIZATION_TYPE
                 message = f"ChartTypeClass for Redash Visualization Type={viz_type} is missing. Setting to {DEFAULT_VISUALIZATION_TYPE}"
-                self.report.report_warning(key=report_key, reason=message)
+                self.report.warning(title=report_type, message=message, log=False)
                 logger.warning(message)
 
         return chart_type
 
-    def _get_chart_snapshot(self, query_data: Dict, viz_data: Dict) -> ChartSnapshot:
+    def _build_chart_info(self, query_data: Dict, viz_data: Dict) -> ChartInfoClass:
         viz_id = viz_data["id"]
         chart_urn = f"urn:li:chart:({self.platform},{viz_id})"
-        chart_snapshot = ChartSnapshot(
-            urn=chart_urn,
-            aspects=[],
-        )
 
         modified_actor = f"urn:li:corpuser:{viz_data.get('changed_by', {}).get('username', 'unknown')}"
         modified_ts = int(
@@ -565,16 +644,15 @@ class RedashSource(Source):
         title = f"{query_data.get('name')} {viz_data.get('name', '')}"
 
         last_modified = ChangeAuditStamps(
-            created=AuditStamp(time=modified_ts, actor=modified_actor),
+            created=None,
             lastModified=AuditStamp(time=modified_ts, actor=modified_actor),
         )
 
         # Getting chart type
         chart_type = self._get_chart_type_from_viz_data(viz_data)
-        chart_url = f"{self.config.connect_uri}/queries/{query_data.get('id')}#{viz_id}"
-        description = (
-            viz_data.get("description", "") if viz_data.get("description", "") else ""
-        )
+        query_id = query_data.get("id")
+        chart_url = f"{self.config.connect_uri}/queries/{query_id}#{viz_id}"
+        description = viz_data.get("description", "") or ""
         data_source_id = query_data.get("data_source_id")
         data_source = self._get_chart_data_source(data_source_id)
         data_source_type = data_source.get("type")
@@ -582,12 +660,16 @@ class RedashSource(Source):
         datasource_urns = self._get_datasource_urns(data_source, query_data)
 
         if datasource_urns is None:
-            self.report.report_warning(
-                key=f"redash-chart-{viz_id}",
-                reason=f"data_source_type={data_source_type} not yet implemented. Setting inputs to None",
+            self.report.charts_no_input.add(chart_urn)
+            self.report.queries_no_dataset.add(str(query_id))
+            self.report.warning(
+                title="Redash chart input missing",
+                message="No datasources found for chart, setting inputs to None",
+                context=f"viz_id={viz_id}, query_id={query_id}, data_source_id={data_source_id}, data_source_type={data_source_type}",
+                log=False,
             )
 
-        chart_info = ChartInfoClass(
+        return ChartInfoClass(
             type=chart_type,
             description=description,
             title=title,
@@ -595,63 +677,65 @@ class RedashSource(Source):
             chartUrl=chart_url,
             inputs=datasource_urns or None,
         )
-        chart_snapshot.aspects.append(chart_info)
 
-        return chart_snapshot
-
-    def _emit_chart_mces(self) -> Iterable[MetadataWorkUnit]:
-        current_queries_page = 1
-        skip_draft = self.config.skip_draft
-
-        # Get total number of queries to calculate maximum page number
-        _queries_response = self.client.queries(1, PAGE_SIZE)
-        total_queries = _queries_response["count"]
-        max_page = total_queries // PAGE_SIZE
-
-        while (
-            current_queries_page <= max_page
-            and current_queries_page <= self.api_page_limit
-        ):
+    def _process_query_response(self, current_page: int) -> Iterable[MetadataWorkUnit]:
+        logger.info(f"Starting processing query for page {current_page}")
+        if current_page > self.api_page_limit:
+            logger.info(f"{current_page} > {self.api_page_limit} so returning")
+            return
+        with PerfTimer() as timer:
             queries_response = self.client.queries(
-                page=current_queries_page, page_size=PAGE_SIZE
+                page=current_page, page_size=self.config.page_size
             )
-
-            logger.info(f"/api/queries on page {current_queries_page}")
-
-            current_queries_page += 1
-
             for query_response in queries_response["results"]:
-
                 chart_name = query_response["name"]
-
                 self.report.report_item_scanned()
-
                 if (not self.config.chart_patterns.allowed(chart_name)) or (
-                    skip_draft and query_response["is_draft"]
+                    self.config.skip_draft and query_response["is_draft"]
                 ):
                     self.report.report_dropped(chart_name)
                     continue
-
                 query_id = query_response["id"]
                 query_data = self.client._get(f"/api/queries/{query_id}").json()
                 logger.debug(query_data)
 
                 # In Redash, chart is called visualization
                 for visualization in query_data.get("visualizations", []):
-                    chart_snapshot = self._get_chart_snapshot(query_data, visualization)
-                    mce = MetadataChangeEvent(proposedSnapshot=chart_snapshot)
-                    wu = MetadataWorkUnit(id=chart_snapshot.urn, mce=mce)
-                    self.report.report_workunit(wu)
+                    yield MetadataChangeProposalWrapper(
+                        entityUrn=f"urn:li:chart:({self.platform},{visualization['id']})",
+                        aspect=self._build_chart_info(query_data, visualization),
+                    ).as_workunit()
 
-                    yield wu
+            self.report.timing[f"query-{current_page}"] = int(timer.elapsed_seconds())
+            logger.info(f"Ending processing query for {current_page}")
 
-    def get_workunits(self) -> Iterable[MetadataWorkUnit]:
-        self.test_connection()
-        yield from self._emit_dashboard_mces()
-        yield from self._emit_chart_mces()
+    def _gen_chart_workunits(self) -> Iterable[MetadataWorkUnit]:
+        # Get total number of queries to calculate maximum page number
+        queries_response = self.client.queries(1, self.config.page_size)
+        total_queries = queries_response["count"]
+        max_page = math.ceil(total_queries / self.config.page_size)
+        logger.info(f"/api/queries total count {total_queries} and max page {max_page}")
+        self.report.total_queries = total_queries
+        self.report.max_page_queries = max_page
+
+        yield from ThreadedIteratorExecutor.process(
+            self._process_query_response,
+            [(page,) for page in range(1, max_page + 1)],
+            max_workers=self.config.parallelism,
+        )
+
+    def add_config_to_report(self) -> None:
+        self.report.api_page_limit = self.config.api_page_limit
+
+    def get_workunits_internal(self) -> Iterable[MetadataWorkUnit]:
+        self.validate_connection()
+        self.add_config_to_report()
+        with PerfTimer() as timer:
+            yield from self._gen_chart_workunits()
+            self.report.timing["time-all-charts"] = int(timer.elapsed_seconds())
+        with PerfTimer() as timer:
+            yield from self._gen_dashboard_workunits()
+            self.report.timing["time-all-dashboards"] = int(timer.elapsed_seconds())
 
     def get_report(self) -> SourceReport:
         return self.report
-
-    def close(self):
-        pass

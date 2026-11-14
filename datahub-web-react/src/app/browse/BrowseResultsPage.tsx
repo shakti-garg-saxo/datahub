@@ -1,15 +1,19 @@
-import React from 'react';
-import { Redirect, useHistory, useLocation, useParams } from 'react-router';
+import { Affix } from 'antd';
 import * as QueryString from 'query-string';
-import { Affix, Alert } from 'antd';
-import { BrowseCfg } from '../../conf';
-import { BrowseResults } from './BrowseResults';
-import { SearchablePage } from '../search/SearchablePage';
-import { useGetBrowseResultsQuery } from '../../graphql/browse.generated';
-import { LegacyBrowsePath } from './LegacyBrowsePath';
-import { PageRoutes } from '../../conf/Global';
-import { useEntityRegistry } from '../useEntityRegistry';
-import { Message } from '../shared/Message';
+import React from 'react';
+import { useTranslation } from 'react-i18next';
+import { Redirect, useHistory, useLocation, useParams } from 'react-router';
+
+import { BrowseResults } from '@app/browse/BrowseResults';
+import { LegacyBrowsePath } from '@app/browse/LegacyBrowsePath';
+import { Message } from '@app/sharedV2/Message';
+import { ErrorSection } from '@app/sharedV2/error/ErrorSection';
+import { scrollToTop } from '@app/sharedV2/searchUtils';
+import { useEntityRegistry } from '@app/useEntityRegistry';
+import { PageRoutes } from '@conf/Global';
+import { BrowseCfg } from '@src/conf';
+
+import { useGetBrowseResultsQuery } from '@graphql/browse.generated';
 
 type BrowseResultsPageParams = {
     type: string;
@@ -19,6 +23,7 @@ export const BrowseResultsPage = () => {
     const location = useLocation();
     const history = useHistory();
     const { type } = useParams<BrowseResultsPageParams>();
+    const { t: tf } = useTranslation('common.feedback');
 
     const entityRegistry = useEntityRegistry();
 
@@ -38,13 +43,11 @@ export const BrowseResultsPage = () => {
                 filters: null,
             },
         },
+        fetchPolicy: 'cache-first',
     });
 
-    if (error || (!loading && !error && !data)) {
-        return <Alert type="error" message={error?.message || 'Entity failed to load'} />;
-    }
-
     const onChangePage = (newPage: number) => {
+        scrollToTop();
         history.push({
             pathname: rootPath,
             search: `&page=${newPage}`,
@@ -56,12 +59,13 @@ export const BrowseResultsPage = () => {
     }
 
     return (
-        <SearchablePage>
-            <Affix offsetTop={64}>
+        <>
+            <Affix offsetTop={60}>
                 <LegacyBrowsePath type={entityType} path={path} isBrowsable />
             </Affix>
-            {loading && <Message type="loading" content="Loading..." style={{ marginTop: '10%' }} />}
-            {data && data.browse && (
+            {error && <ErrorSection />}
+            {loading && <Message type="loading" content={tf('loading')} style={{ marginTop: '10%' }} />}
+            {data && data.browse && !loading && (
                 <BrowseResults
                     type={entityType}
                     rootPath={rootPath}
@@ -74,6 +78,6 @@ export const BrowseResultsPage = () => {
                     onChangePage={onChangePage}
                 />
             )}
-        </SearchablePage>
+        </>
     );
 };

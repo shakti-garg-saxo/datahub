@@ -1,43 +1,60 @@
 # Defining environment
 ARG APP_ENV=prod
 
-FROM adoptopenjdk/openjdk8:alpine-jre as base
-ENV DOCKERIZE_VERSION v0.6.1
-RUN apk --no-cache add curl tar wget \
-    && curl https://repo1.maven.org/maven2/org/eclipse/jetty/jetty-runner/9.4.20.v20190813/jetty-runner-9.4.20.v20190813.jar --output jetty-runner.jar \
-    && curl https://repo1.maven.org/maven2/org/eclipse/jetty/jetty-jmx/9.4.20.v20190813/jetty-jmx-9.4.20.v20190813.jar --output jetty-jmx.jar \
-    && curl https://repo1.maven.org/maven2/org/eclipse/jetty/jetty-util/9.4.20.v20190813/jetty-util-9.4.20.v20190813.jar --output jetty-util.jar \
-    && wget https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v1.4.1/opentelemetry-javaagent-all.jar \
-    && wget https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.16.1/jmx_prometheus_javaagent-0.16.1.jar -O jmx_prometheus_javaagent.jar \
-    && curl -L https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz | tar -C /usr/local/bin -xzv
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+FROM ${BASE_IMAGE} AS base
 
-FROM adoptopenjdk/openjdk8:alpine-slim as prod-build
-RUN apk --no-cache add perl
-COPY . /datahub-src
-RUN cd /datahub-src && ./gradlew :metadata-service:war:build -x test
-RUN cp /datahub-src/metadata-service/war/build/libs/war.war /war.war
+# Defining custom repo urls for use in enterprise environments. Re-used between stages below.
+ARG APK_REPOSITORY_URL=https://apk.cgr.dev/chainguard
+ARG GITHUB_REPO_URL=https://github.com
+ARG MAVEN_CENTRAL_REPO_URL=https://repo1.maven.org/maven2
 
-FROM base as prod-install
-COPY --from=prod-build /war.war /datahub/datahub-gms/bin/war.war
-COPY --from=prod-build /datahub-src/metadata-models/src/main/resources/entity-registry.yml /datahub/datahub-gms/resources/entity-registry.yml
-COPY --from=prod-build /datahub-src/docker/datahub-gms/start.sh /datahub/datahub-gms/scripts/start.sh
-COPY --from=prod-build /datahub-src/docker/monitoring/client-prometheus-config.yaml /datahub/datahub-gms/scripts/prometheus-config.yaml
-RUN chmod +x /datahub/datahub-gms/scripts/start.sh
+ENV JMX_VERSION=1.0.1
 
-FROM base as dev-install
+RUN printf '%s\n' "${APK_REPOSITORY_URL}" > /etc/apk/repositories \
+    && apk update --no-cache \
+    && apk upgrade --no-cache
+
+COPY docker/snippets/setup_java_runtime.sh /tmp/setup_java_runtime.sh
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    chmod +x /tmp/setup_java_runtime.sh \
+    && INSTALL_JATTACH=1 OTEL_JMX_DIR=/ /tmp/setup_java_runtime.sh \
+    && rm -f /tmp/setup_java_runtime.sh
+
+COPY docker/snippets/wait_for_deps.sh /usr/local/lib/datahub/wait_for_deps.sh
+
+RUN addgroup -S datahub && adduser -S datahub -G datahub && chmod g-s /home/datahub \
+    && mkdir -p /etc/datahub/plugins/auth/resources \
+        /datahub/datahub-gms/bin /datahub/datahub-gms/resources /datahub/datahub-gms/scripts \
+    && chown -R datahub:datahub /etc/datahub /datahub
+
+FROM base AS prod-install
+COPY --chown=datahub:datahub metadata-models/src/main/resources/entity-registry.yml /datahub/datahub-gms/resources/entity-registry.yml
+COPY --chown=datahub:datahub --chmod=755 docker/datahub-gms/start.sh /datahub/datahub-gms/scripts/start.sh
+COPY --chown=datahub:datahub docker/monitoring/client-prometheus-config.yaml /datahub/datahub-gms/scripts/prometheus-config.yaml
+# WAR_FILE selects the boot archive: war.war (default, slim) or war-onnx.war (datahub-gms-onnx
+# variant, which bundles the ONNX/DJL native libs). Destination filename stays war.war so start.sh
+# is unchanged.
+ARG WAR_FILE=war.war
+COPY --chown=datahub:datahub metadata-service/war/build/libs/${WAR_FILE} /datahub/datahub-gms/bin/war.war
+
+FROM base AS dev-install
 # Dummy stage for development. Assumes code is built on your machine and mounted to this image.
 # See this excellent thread https://github.com/docker/cli/issues/1134
 
-FROM ${APP_ENV}-install as final
+FROM ${APP_ENV}-install AS final
 
-RUN addgroup -S datahub && adduser -S datahub -G datahub
 USER datahub
 
 ENV JMX_OPTS=""
 ENV JAVA_OPTS=""
+ENV OTEL_EXPORTER_OTLP_MAX_PAYLOAD_SIZE=4194304 \
+    OTEL_EXPORTER_OTLP_HTTP_HTTP2_MAX_FRAME_SIZE=8388608 \
+    OTEL_EXPORTER_OTLP_HTTP_COMPRESSION=gzip \
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION=gzip
 
 EXPOSE 8080
 
-HEALTHCHECK --start-period=2m --retries=4 CMD curl --fail http://localhost:8080/health || exit 1
+HEALTHCHECK --start-period=2m --retries=4 CMD curl --fail http://localhost:8080/${DATAHUB_GMS_BASE_PATH}health || exit 1
 
 CMD /datahub/datahub-gms/scripts/start.sh

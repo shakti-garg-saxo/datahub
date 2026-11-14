@@ -9,32 +9,58 @@ query getBrowseResults($input: BrowseInput!) {
         entities {
             urn
             type
-            ... on Dataset {
+            ... on HasName {
                 name
-                origin
-                description
+            }
+            ... on HasPlatform {
                 platform {
-                    name
-                    info {
-                        logoUrl
-                    }
+                    ...platformFields
                 }
+            }
+            ... on HasOwnership {
                 ownership {
                     ...ownershipFields
+                }
+            }
+            ... on HasGlossaryTerms {
+                glossaryTerms {
+                    ...glossaryTerms
+                }
+            }
+            ... on HasSubTypes {
+                subTypes {
+                    typeNames
+                }
+            }
+            ... on HasDomain {
+                domain {
+                    ...entityDomain
+                }
+            }
+            ... on HasDescription {
+                description
+            }
+            ... on Dataset {
+                origin
+                properties {
+                    name
+                    description
+                }
+                editableProperties {
+                    name
+                    description
                 }
                 globalTags {
                     ...globalTagsFields
                 }
-                glossaryTerms {
-                    ...glossaryTerms
-                }
+                ...entityDataProduct
             }
             ... on Dashboard {
                 urn
                 type
                 tool
                 dashboardId
-                info {
+                properties {
                     name
                     description
                     externalUrl
@@ -43,22 +69,18 @@ query getBrowseResults($input: BrowseInput!) {
                         time
                     }
                 }
-                ownership {
-                    ...ownershipFields
-                }
                 globalTags {
                     ...globalTagsFields
                 }
-                glossaryTerms {
-                    ...glossaryTerms
+                ...entityDataProduct
+                editableProperties {
+                    description
                 }
             }
             ... on GlossaryTerm {
-                name
-                ownership {
-                    ...ownershipFields
-                }
-                glossaryTermInfo {
+                properties {
+                    name
+                    description
                     definition
                     termSource
                     sourceRef
@@ -74,7 +96,7 @@ query getBrowseResults($input: BrowseInput!) {
                 type
                 tool
                 chartId
-                info {
+                properties {
                     name
                     description
                     externalUrl
@@ -84,14 +106,12 @@ query getBrowseResults($input: BrowseInput!) {
                         time
                     }
                 }
-                ownership {
-                    ...ownershipFields
-                }
                 globalTags {
                     ...globalTagsFields
                 }
-                glossaryTerms {
-                    ...glossaryTerms
+                ...entityDataProduct
+                editableProperties {
+                    description
                 }
             }
             ... on DataFlow {
@@ -100,26 +120,41 @@ query getBrowseResults($input: BrowseInput!) {
                 orchestrator
                 flowId
                 cluster
-                info {
+                properties {
                     name
                     description
                     project
                 }
-                ownership {
-                    ...ownershipFields
+                globalTags {
+                    ...globalTagsFields
+                }
+                ...entityDataProduct
+                editableProperties {
+                    description
+                }
+            }
+            ... on DataJob {
+                urn
+                type
+                dataFlow {
+                    ...nonRecursiveDataFlowFields
+                }
+                jobId
+                properties {
+                    name
+                    description
                 }
                 globalTags {
                     ...globalTagsFields
                 }
-                glossaryTerms {
-                    ...glossaryTerms
+                ...entityDataProduct
+                editableProperties {
+                    description
                 }
             }
             ... on MLFeatureTable {
                 urn
                 type
-                name
-                description
                 featureTableProperties {
                     description
                     mlFeatures {
@@ -129,46 +164,15 @@ query getBrowseResults($input: BrowseInput!) {
                         urn
                     }
                 }
-                ownership {
-                    ...ownershipFields
-                }
-                platform {
-                    name
-                    info {
-                        logoUrl
-                    }
-                }
             }
             ... on MLModel {
-                name
                 origin
-                description
-                ownership {
-                    ...ownershipFields
-                }
                 globalTags {
                     ...globalTagsFields
                 }
-                platform {
-                    name
-                    info {
-                        logoUrl
-                    }
-                }
             }
             ... on MLModelGroup {
-                name
                 origin
-                description
-                ownership {
-                    ...ownershipFields
-                }
-                platform {
-                    name
-                    info {
-                        logoUrl
-                    }
-                }
             }
         }
         groups {

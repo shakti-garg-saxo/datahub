@@ -1,0 +1,28 @@
+namespace com.linkedin.metadata.key
+
+/**
+ * Key for a Document
+ */
+@Aspect = {
+  "name": "documentKey"
+}
+record DocumentKey {
+  /**
+   * Unique identifier for the document.
+   */
+  @Searchable = {
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "id",
+      "boostScore": 2.0,
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  id: string
+}
+

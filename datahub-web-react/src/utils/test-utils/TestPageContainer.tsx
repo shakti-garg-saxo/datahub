@@ -1,41 +1,24 @@
+import { Remirror, useRemirror } from '@remirror/react';
 import React, { useMemo } from 'react';
+import { HelmetProvider } from 'react-helmet-async';
 import { MemoryRouter } from 'react-router';
-import { ThemeProvider } from 'styled-components';
+import { ItalicExtension, UnderlineExtension } from 'remirror/extensions';
 
-import { CLIENT_AUTH_COOKIE } from '../../conf/Global';
-import { DatasetEntity } from '../../app/entity/dataset/DatasetEntity';
-import { DataFlowEntity } from '../../app/entity/dataFlow/DataFlowEntity';
-import { DataJobEntity } from '../../app/entity/dataJob/DataJobEntity';
-import { UserEntity } from '../../app/entity/user/User';
-import { GroupEntity } from '../../app/entity/group/Group';
-import EntityRegistry from '../../app/entity/EntityRegistry';
-import { EntityRegistryContext } from '../../entityRegistryContext';
-import { TagEntity } from '../../app/entity/tag/Tag';
-
-import defaultThemeConfig from '../../conf/theme/theme_light.config.json';
-import { GlossaryTermEntity } from '../../app/entity/glossaryTerm/GlossaryTermEntity';
-import { MLFeatureTableEntity } from '../../app/entity/mlFeatureTable/MLFeatureTableEntity';
-import { MLModelEntity } from '../../app/entity/mlModel/MLModelEntity';
-import { MLModelGroupEntity } from '../../app/entity/mlModelGroup/MLModelGroupEntity';
+import buildEntityRegistryV2 from '@app/buildEntityRegistryV2';
+import UserContextProvider from '@app/context/UserContextProvider';
+import EntityRegistry from '@app/entityV2/EntityRegistry';
+import { CLIENT_AUTH_COOKIE } from '@conf/Global';
+import AppConfigProvider from '@src/AppConfigProvider';
+import CustomThemeProvider from '@src/CustomThemeProvider';
+import { EntityRegistryContext } from '@src/entityRegistryContext';
 
 type Props = {
     children: React.ReactNode;
     initialEntries?: string[];
 };
 
-export function getTestEntityRegistry() {
-    const entityRegistry = new EntityRegistry();
-    entityRegistry.register(new DatasetEntity());
-    entityRegistry.register(new UserEntity());
-    entityRegistry.register(new GroupEntity());
-    entityRegistry.register(new TagEntity());
-    entityRegistry.register(new DataFlowEntity());
-    entityRegistry.register(new DataJobEntity());
-    entityRegistry.register(new GlossaryTermEntity());
-    entityRegistry.register(new MLFeatureTableEntity());
-    entityRegistry.register(new MLModelEntity());
-    entityRegistry.register(new MLModelGroupEntity());
-    return entityRegistry;
+export function getTestEntityRegistry(): EntityRegistry {
+    return buildEntityRegistryV2();
 }
 
 export default ({ children, initialEntries }: Props) => {
@@ -44,13 +27,29 @@ export default ({ children, initialEntries }: Props) => {
         writable: true,
         value: `${CLIENT_AUTH_COOKIE}=urn:li:corpuser:2`,
     });
-    jest.mock('js-cookie', () => ({ get: () => 'urn:li:corpuser:2' }));
+    vi.mock('js-cookie', () => ({ default: { get: () => 'urn:li:corpuser:2' } }));
+
+    // mock remirror
+    const extensions = () => [new ItalicExtension(), new UnderlineExtension()];
+    const { manager, state } = useRemirror({
+        extensions,
+    });
 
     return (
-        <ThemeProvider theme={defaultThemeConfig}>
-            <MemoryRouter initialEntries={initialEntries}>
-                <EntityRegistryContext.Provider value={entityRegistry}>{children}</EntityRegistryContext.Provider>
-            </MemoryRouter>
-        </ThemeProvider>
+        <HelmetProvider>
+            <CustomThemeProvider>
+                <MemoryRouter initialEntries={initialEntries}>
+                    <EntityRegistryContext.Provider value={entityRegistry}>
+                        <UserContextProvider>
+                            <AppConfigProvider>
+                                <Remirror manager={manager} state={state}>
+                                    {children}
+                                </Remirror>
+                            </AppConfigProvider>
+                        </UserContextProvider>
+                    </EntityRegistryContext.Provider>
+                </MemoryRouter>
+            </CustomThemeProvider>
+        </HelmetProvider>
     );
 };

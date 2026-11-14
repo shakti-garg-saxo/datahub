@@ -1,15 +1,16 @@
 package com.linkedin.metadata.systemmetadata;
 
+import static io.datahubproject.metadata.context.SystemTelemetryContext.TELEMETRY_TRACE_KEY;
+
 import com.google.common.collect.ImmutableMap;
 import java.util.HashMap;
 import java.util.Map;
 import lombok.extern.slf4j.Slf4j;
 
-
 @Slf4j
 public class SystemMetadataMappingsBuilder {
 
-  private SystemMetadataMappingsBuilder() { }
+  private SystemMetadataMappingsBuilder() {}
 
   public static Map<String, Object> getMappings() {
     Map<String, Object> mappings = new HashMap<>();
@@ -17,7 +18,15 @@ public class SystemMetadataMappingsBuilder {
     mappings.put("aspect", getMappingsForKeyword());
     mappings.put("runId", getMappingsForKeyword());
     mappings.put("lastUpdated", getMappingsForLastUpdated());
-
+    mappings.put("registryVersion", getMappingsForKeyword());
+    mappings.put("registryName", getMappingsForKeyword());
+    mappings.put("removed", getMappingsForRemoved());
+    mappings.put(TELEMETRY_TRACE_KEY, getMappingsForKeyword());
+    // Timestamp fields for aspect creation/modification - used for filtering in consistency checks
+    mappings.put("aspectCreatedTime", getMappingsForLastUpdated());
+    mappings.put("aspectCreatedActor", getMappingsForKeyword());
+    mappings.put("aspectModifiedTime", getMappingsForLastUpdated());
+    mappings.put("aspectModifiedActor", getMappingsForKeyword());
     return ImmutableMap.of("properties", mappings);
   }
 
@@ -27,5 +36,9 @@ public class SystemMetadataMappingsBuilder {
 
   private static Map<String, Object> getMappingsForLastUpdated() {
     return ImmutableMap.<String, Object>builder().put("type", "long").build();
+  }
+
+  private static Map<String, Object> getMappingsForRemoved() {
+    return ImmutableMap.<String, Object>builder().put("type", "boolean").build();
   }
 }

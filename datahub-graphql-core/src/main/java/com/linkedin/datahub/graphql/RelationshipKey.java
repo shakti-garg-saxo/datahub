@@ -1,9 +1,8 @@
 package com.linkedin.datahub.graphql;
 
-import com.linkedin.metadata.query.RelationshipDirection;
+import com.linkedin.metadata.query.filter.RelationshipDirection;
 import lombok.AllArgsConstructor;
 import lombok.Data;
-
 
 @Data
 @AllArgsConstructor

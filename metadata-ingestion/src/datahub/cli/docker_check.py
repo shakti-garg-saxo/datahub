@@ -1,118 +1,378 @@
+import enum
+import os
+import pathlib
 from contextlib import contextmanager
-from typing import Iterator, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, Iterator, List, Optional, Set
 
 import docker
+import docker.errors
+import docker.models.containers
+import yaml
 
-REQUIRED_CONTAINERS = [
-    "elasticsearch-setup",
-    "elasticsearch",
-    "datahub-gms",
-    "datahub-frontend-react",
-    "kafka-setup",
-    "schema-registry",
-    "broker",
-    "mysql",
-    "zookeeper",
-    # These two containers are not necessary - only helpful in debugging.
-    # "kafka-topics-ui",
-    # "schema-registry-ui",
-    # "kibana",
-    # "kafka-rest-proxy",
-    # "datahub-mce-consumer",
-    # "datahub-mae-consumer"
-]
-
-ENSURE_EXIT_SUCCESS = [
-    "kafka-setup",
-    "elasticsearch-setup",
-    "mysql-setup",
-]
-
-CONTAINERS_TO_CHECK_IF_PRESENT = [
-    # We only add this container in some cases, but if it's present, we
-    # definitely want to check that it exits properly.
-    "mysql-setup",
-    "neo4j",
-]
+from datahub.configuration.common import ExceptionWithProps
+from datahub.configuration.env_vars import get_compose_project_name
 
 # Docker seems to under-report memory allocated, so we also need a bit of buffer to account for it.
-MIN_MEMORY_NEEDED = 3.8  # GB
+MIN_MEMORY_NEEDED = 4.3  # GB
+MIN_DISK_SPACE_NEEDED = 13  # GB
+
+DOCKER_COMPOSE_PROJECT_NAME = get_compose_project_name()
+DATAHUB_COMPOSE_PROJECT_FILTER = {
+    "label": f"com.docker.compose.project={DOCKER_COMPOSE_PROJECT_NAME}"
+}
+
+DATAHUB_COMPOSE_LEGACY_VOLUME_FILTERS = [
+    {"name": "datahub_neo4jdata"},
+    {"name": "datahub_mysqldata"},
+    {"name": "datahub_zkdata"},
+    {"name": "datahub_esdata"},
+    {"name": "datahub_cassandradata"},
+    {"name": "datahub_broker"},
+]
+
+
+class DockerNotRunningError(Exception):
+    SHOW_STACK_TRACE = False
+
+
+class DockerLowMemoryError(Exception):
+    SHOW_STACK_TRACE = False
+
+
+class DockerLowDiskSpaceError(Exception):
+    SHOW_STACK_TRACE = False
+
+
+class DockerComposeVersionError(Exception):
+    SHOW_STACK_TRACE = False
+
+
+class QuickstartError(Exception, ExceptionWithProps):
+    SHOW_STACK_TRACE = False
+
+    def __init__(self, message: str, container_statuses: Dict[str, Any]):
+        super().__init__(message)
+        self.container_statuses = container_statuses
+
+    def get_telemetry_props(self) -> Dict[str, Any]:
+        return self.container_statuses
 
 
 @contextmanager
-def get_client_with_error() -> Iterator[
-    Tuple[docker.DockerClient, Optional[Exception]]
-]:
+def get_docker_client() -> Iterator[docker.DockerClient]:
+    # Get a reference to the Docker client.
+    client = None
     try:
-        docker_cli = docker.from_env()
+        client = docker.from_env()
     except docker.errors.DockerException as error:
-        yield None, error
-    else:
         try:
-            yield docker_cli, None
-        finally:
-            docker_cli.close()
+            # Docker Desktop 4.13.0 broke the docker.sock symlink.
+            # See https://github.com/docker/docker-py/issues/3059.
+            maybe_sock_path = os.path.expanduser("~/.docker/run/docker.sock")
+            if os.path.exists(maybe_sock_path):
+                client = docker.DockerClient(base_url=f"unix://{maybe_sock_path}")
+            else:
+                raise error
+        except docker.errors.DockerException as error:
+            raise DockerNotRunningError(
+                "Docker doesn't seem to be running. Did you start it?"
+            ) from error
+    assert client
+
+    # Make sure that we can talk to Docker.
+    try:
+        client.ping()
+    except docker.errors.DockerException as error:
+        raise DockerNotRunningError(
+            "Unable to talk to Docker. Did you start it?"
+        ) from error
+
+    # Yield the client and make sure to close it.
+    try:
+        yield client
+    finally:
+        client.close()
 
 
 def memory_in_gb(mem_bytes: int) -> float:
     return mem_bytes / (1024 * 1024 * 1000)
 
 
-def check_local_docker_containers(preflight_only: bool = False) -> List[str]:
-    issues: List[str] = []
-    with get_client_with_error() as (client, error):
-        if error:
-            issues.append("Docker doesn't seem to be running. Did you start it?")
-            return issues
+def run_quickstart_preflight_checks(client: docker.DockerClient) -> None:
+    # Check total memory.
+    # TODO: add option to skip this check.
+    total_mem_configured = int(client.info()["MemTotal"])
+    if memory_in_gb(total_mem_configured) < MIN_MEMORY_NEEDED:
+        raise DockerLowMemoryError(
+            f"Total Docker memory configured {memory_in_gb(total_mem_configured):.2f}GB is below the minimum threshold {MIN_MEMORY_NEEDED}GB. "
+            "You can increase the memory allocated to Docker in the Docker settings."
+        )
 
-        # Check total memory.
-        total_mem_configured = int(client.info()["MemTotal"])
-        if memory_in_gb(total_mem_configured) < MIN_MEMORY_NEEDED:
-            issues.append(
-                f"Total Docker memory configured {memory_in_gb(total_mem_configured):.2f}GB is below the minimum threshold {MIN_MEMORY_NEEDED}GB"
-            )
+    # docker-py's containers.run() only returns a container's output when its
+    # logging driver is json-file or journald, and returns None for any other
+    # driver. Docker Desktop 4.94+ defaults new containers to the "local"
+    # driver, so pin json-file for this throwaway container rather than depend
+    # on the daemon's default. See docker/docker-py#3455.
+    result = client.containers.run(
+        "alpine:latest",
+        "sh -c \"df -B1 -P / | awk 'NR==2{print $2, $4}'\"",  # total, available
+        remove=True,
+        stdout=True,
+        stderr=True,
+        log_config=docker.types.LogConfig(type=docker.types.LogConfig.types.JSON),
+    )
 
-        if preflight_only:
-            return issues
+    output = result.decode("utf-8").strip()
+    total_bytes, available_bytes = map(int, output.split())
 
-        containers = client.containers.list(
-            all=True,
-            filters={
-                "label": "com.docker.compose.project=datahub",
+    available_gb = available_bytes / (1024**3)
+    if available_gb < MIN_DISK_SPACE_NEEDED:
+        raise DockerLowDiskSpaceError(
+            f"Total Docker disk space available {available_gb:.2f}GB is below the minimum threshold {MIN_DISK_SPACE_NEEDED}GB. "
+            "You can increase the disk space allocated to Docker in the Docker settings or free up disk space`"
+        )
+
+
+class ContainerStatus(enum.Enum):
+    OK = "is ok"
+
+    # For containers that are expected to exit 0.
+    STILL_RUNNING = "is still running"
+    EXITED_WITH_FAILURE = "exited with an error"
+
+    # For containers that are expected to be running.
+    DIED = "is not running"
+    MISSING = "is not present"
+    STARTING = "is still starting"
+    UNHEALTHY = "is running by not yet healthy"
+
+
+@dataclass
+class DockerContainerStatus:
+    name: str
+    status: ContainerStatus
+
+
+@dataclass
+class QuickstartStatus:
+    containers: List[DockerContainerStatus]
+    volumes: Set[str]
+    # On moving to compose profiles, this CLI will no longer support running quickstart instances from earlier versions.
+    # While the check command can work, upgrades or
+    running_unsupported_version: bool
+
+    def __init__(
+        self,
+        containers: List[DockerContainerStatus],
+        volumes: List[str],
+        running_unsupported_version: bool = False,
+    ):
+        self.containers = containers
+        self.running_unsupported_version = running_unsupported_version
+        self.volumes = set(volumes)
+
+    def errors(self) -> List[str]:
+        if not self.containers:
+            return ["datahub is not running"]
+
+        return [
+            f"{container.name} {container.status.value}"
+            for container in self.containers
+            if container.status != ContainerStatus.OK
+        ]
+
+    def is_ok(self) -> bool:
+        return not self.errors()
+
+    def needs_up(self) -> bool:
+        return any(
+            container.status
+            in {
+                ContainerStatus.EXITED_WITH_FAILURE,
+                ContainerStatus.DIED,
+                ContainerStatus.MISSING,
+            }
+            for container in self.containers
+        )
+
+    def to_exception(
+        self, header: str, footer: Optional[str] = None
+    ) -> QuickstartError:
+        message = f"{header}\n"
+        for error in self.errors():
+            message += f"- {error}\n"
+        if footer:
+            message += f"\n{footer}"
+
+        return QuickstartError(
+            message,
+            {
+                "containers_all": [container.name for container in self.containers],
+                "containers_errors": [
+                    container.name
+                    for container in self.containers
+                    if container.status != ContainerStatus.OK
+                ],
+                **{
+                    f"container_{container.name}": container.status.name
+                    for container in self.containers
+                },
             },
         )
 
-        # Check number of containers.
-        if len(containers) == 0:
-            issues.append("quickstart.sh or dev.sh is not running")
+    def get_containers(self) -> Set[str]:
+        if self.containers:
+            return {container.name for container in self.containers}
         else:
-            existing_containers = set(container.name for container in containers)
-            missing_containers = set(REQUIRED_CONTAINERS) - existing_containers
-            for missing in missing_containers:
-                issues.append(f"{missing} container is not present")
+            return set()
 
+
+def detect_legacy_quickstart_compose(containers: Set[str]) -> bool:
+    return "zookeeper" in containers
+
+
+def _get_services_from_compose(compose_file: str) -> Set[str]:
+    with open(compose_file) as config_file:
+        return yaml.safe_load(config_file).get("services", {}).keys()
+
+
+def _get_volumes_from_compose(compose_file: str) -> Set[str]:
+    with open(compose_file) as config_file:
+        return yaml.safe_load(config_file).get("volumes", {}).keys()
+
+
+def check_docker_quickstart() -> QuickstartStatus:
+    container_statuses: List[DockerContainerStatus] = []
+    with get_docker_client() as client:
+        containers = client.containers.list(
+            all=True,
+            filters=DATAHUB_COMPOSE_PROJECT_FILTER,
+            # We can get race conditions between docker running up / recreating
+            # containers and our status checks.
+            ignore_removed=True,
+        )
+        if len(containers) == 0:
+            return QuickstartStatus([], [], running_unsupported_version=False)
+
+        # load the expected containers from the docker-compose file
+        config_files = (
+            containers[0]
+            .labels.get("com.docker.compose.project.config_files")
+            .split(",")
+        )
+
+        # If using profiles, alternative check  ##TODO: Does this really work? Check mixpanel for usage of this.
+        if config_files and "/profiles/" in config_files[0]:
+            return check_docker_quickstart_profiles(client)
+
+        all_containers = set()
+        for config_file in config_files:
+            all_containers.update(_get_services_from_compose(config_file))
+
+        all_volumes = set()
+        for config_file in config_files:
+            all_volumes.update(_get_volumes_from_compose(config_file))
+
+        existing_containers = set()
         # Check that the containers are running and healthy.
+        container: docker.models.containers.Container
         for container in containers:
-            if container.name not in (
-                REQUIRED_CONTAINERS + CONTAINERS_TO_CHECK_IF_PRESENT
-            ):
-                # Ignores things like "datahub-frontend" which are no longer used.
-                # This way, we only check required containers like "datahub-frontend-react"
-                # even if there are some old containers lying around.
+            name = container.labels.get("com.docker.compose.service", container.name)
+            existing_containers.add(name)
+            status = ContainerStatus.OK
+            if name not in all_containers:
+                # Ignores containers that are not part of the datahub docker-compose
                 continue
-
-            if container.name in ENSURE_EXIT_SUCCESS:
+            if container.labels.get("datahub_setup_job", False):
                 if container.status != "exited":
-                    issues.append(f"{container.name} is still running")
+                    status = ContainerStatus.STILL_RUNNING
                 elif container.attrs["State"]["ExitCode"] != 0:
-                    issues.append(f"{container.name} did not exit cleanly")
+                    status = ContainerStatus.EXITED_WITH_FAILURE
 
             elif container.status != "running":
-                issues.append(f"{container.name} is not running")
+                status = ContainerStatus.DIED
             elif "Health" in container.attrs["State"]:
                 if container.attrs["State"]["Health"]["Status"] == "starting":
-                    issues.append(f"{container.name} is still starting")
+                    status = ContainerStatus.STARTING
                 elif container.attrs["State"]["Health"]["Status"] != "healthy":
-                    issues.append(f"{container.name} is running but not healthy")
+                    status = ContainerStatus.UNHEALTHY
 
-    return issues
+            container_statuses.append(DockerContainerStatus(name, status))
+
+        # Check for missing containers.
+        missing_containers = set(all_containers) - existing_containers
+        for missing in missing_containers:
+            container_statuses.append(
+                DockerContainerStatus(missing, ContainerStatus.MISSING)
+            )
+        running_unsupported_version = detect_legacy_quickstart_compose(all_containers)
+    return QuickstartStatus(
+        containers=container_statuses,
+        volumes=list(all_volumes),
+        running_unsupported_version=running_unsupported_version,
+    )
+
+
+def check_docker_quickstart_profiles(client: docker.DockerClient) -> QuickstartStatus:
+    container_statuses: List[DockerContainerStatus] = []
+    containers = client.containers.list(
+        all=True,
+        filters={"label": "io.datahubproject.datahub.component=gms"},
+        # We can get race conditions between docker running up / recreating
+        # containers and our status checks.
+        ignore_removed=True,
+    )
+    if len(containers) == 0:
+        return QuickstartStatus([], [], running_unsupported_version=False)
+
+    existing_containers = set()
+    # Check that the containers are running and healthy.
+    container: docker.models.containers.Container
+    for container in containers:
+        name = container.labels.get("com.docker.compose.service", container.name)
+        existing_containers.add(name)
+        status = ContainerStatus.OK
+        if container.status != "running":
+            status = ContainerStatus.DIED
+        elif "Health" in container.attrs["State"]:
+            if container.attrs["State"]["Health"]["Status"] == "starting":
+                status = ContainerStatus.STARTING
+            elif container.attrs["State"]["Health"]["Status"] != "healthy":
+                status = ContainerStatus.UNHEALTHY
+
+        container_statuses.append(DockerContainerStatus(name, status))
+
+    # TODO: Can this be handled with older verions?
+    return QuickstartStatus(
+        container_statuses, volumes=[], running_unsupported_version=False
+    )
+
+
+def check_upgrade_supported(
+    quickstart_compose_file: List[pathlib.Path], quickstart_status: QuickstartStatus
+) -> bool:
+    if (
+        quickstart_status.running_unsupported_version
+    ):  # we detected a legacy quickstart service
+        return False
+
+    if not quickstart_status.get_containers():  # no containers are running
+        return True
+
+    compose_services = set()
+    compose_volumes = set()
+
+    for compose_file in quickstart_compose_file:
+        compose_services.update(_get_services_from_compose(str(compose_file)))
+        compose_volumes.update(_get_volumes_from_compose(str(compose_file)))
+
+    # if all services and volumes are not the same, the state in the volumes may not be compatible with the new services.
+    # We are checking for containers and volumes per the compose file, not necessarily all of them being present
+    if (
+        compose_services == quickstart_status.get_containers()
+        and compose_volumes == quickstart_status.volumes
+    ):
+        return True
+    else:
+        return False

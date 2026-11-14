@@ -4,6 +4,8 @@ import com.linkedin.datajob.azkaban.AzkabanJobType
 import com.linkedin.common.CustomProperties
 import com.linkedin.common.ExternalReference
 import com.linkedin.common.DataFlowUrn
+import com.linkedin.common.TimeStamp
+import com.linkedin.common.FabricType
 
 /**
  * Information about a Data processing job
@@ -17,9 +19,20 @@ record DataJobInfo includes CustomProperties, ExternalReference {
    * Job name
    */
   @Searchable = {
-    "fieldType": "TEXT_PARTIAL",
+    "fieldType": "WORD_GRAM",
     "enableAutocomplete": true,
-    "boostScore": 10.0
+    "boostScore": 10.0,
+    "fieldNameAliases": [ "_entityName" ],
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
   }
   name: string
 
@@ -28,7 +41,17 @@ record DataJobInfo includes CustomProperties, ExternalReference {
    */
   @Searchable = {
     "fieldType": "TEXT",
-    "hasValuesFieldName": "hasDescription"
+    "hasValuesFieldName": "hasDescription",
+    "sanitizeRichText": true,
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
   }
   description: optional string
 
@@ -41,14 +64,56 @@ record DataJobInfo includes CustomProperties, ExternalReference {
   /**
    * DataFlow urn that this job is part of
    */
-  @Relationship = {
-    "name": "IsPartOf",
-    "entityTypes": [ "dataFlow" ]
-  }
   flowUrn: optional DataFlowUrn
 
   /**
-   * Status of the job
+   * A timestamp documenting when the asset was created in the source Data Platform (not on DataHub)
    */
+  @Searchable = {
+    "/time": {
+      "fieldName": "createdAt",
+      "fieldType": "DATETIME",
+      "v3": {
+        "searchLabel": "sourceCreatedAt",
+        "mappings": [
+          { "type": "DATETIME" }
+        ]
+      }
+    }
+  }
+  created: optional TimeStamp
+
+  /**
+   * A timestamp documenting when the asset was last modified in the source Data Platform (not on DataHub)
+   */
+  @Searchable = {
+    "/time": {
+      "fieldName": "lastModifiedAt",
+      "fieldType": "DATETIME",
+      "v3": {
+        "searchLabel": "sourceLastModifiedAt",
+        "mappings": [
+          { "type": "DATETIME" }
+        ]
+      }
+    }
+  }
+  lastModified: optional TimeStamp
+
+  /**
+   * Status of the job - Deprecated for Data Process Instance model.
+   */
+  @deprecated = "Use Data Process Instance model, instead"
   status: optional JobStatus
+
+  /**
+   * Environment for this job
+   */
+  @Searchable = {
+    "fieldType": "KEYWORD",
+    "addToFilters": true,
+    "filterNameOverride": "Environment",
+    "queryByDefault": false
+  }
+  env: optional FabricType
 }

@@ -1,0 +1,61 @@
+namespace com.linkedin.notebook
+
+import com.linkedin.common.ChangeAuditStamps
+import com.linkedin.common.Url
+import com.linkedin.common.CustomProperties
+import com.linkedin.common.ExternalReference
+
+/**
+ * Information about a Notebook
+ * Note: This is IN BETA version
+ */
+@Aspect = {
+  "name": "notebookInfo"
+}
+record NotebookInfo includes CustomProperties, ExternalReference {
+
+  /**
+   * Title of the Notebook
+   */
+  @Searchable = {
+    "fieldType": "WORD_GRAM",
+    "enableAutocomplete": true,
+    "boostScore": 10.0,
+    "fieldNameAliases": [ "_entityName" ],
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  title: string
+
+  /**
+   * Detailed description about the Notebook
+   */
+  @Searchable = {
+    "fieldType": "TEXT",
+    "hasValuesFieldName": "hasDescription",
+    "sanitizeRichText": true,
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  description: optional string
+
+  /**
+   * Captures information about who created/last modified/deleted this Notebook and when
+   */
+  changeAuditStamps: ChangeAuditStamps
+}

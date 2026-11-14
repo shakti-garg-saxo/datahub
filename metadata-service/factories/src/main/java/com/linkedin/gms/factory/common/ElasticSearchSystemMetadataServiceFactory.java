@@ -1,10 +1,12 @@
 package com.linkedin.gms.factory.common;
 
+import com.linkedin.gms.factory.config.ConfigurationProvider;
+import com.linkedin.gms.factory.search.BaseElasticSearchComponentsFactory;
+import com.linkedin.gms.factory.search.SearchClusterRegistry;
+import com.linkedin.metadata.config.search.SearchComponent;
 import com.linkedin.metadata.systemmetadata.ESSystemMetadataDAO;
 import com.linkedin.metadata.systemmetadata.ElasticSearchSystemMetadataService;
-import com.linkedin.metadata.utils.elasticsearch.IndexConvention;
 import javax.annotation.Nonnull;
-import org.elasticsearch.client.RestHighLevelClient;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -12,43 +14,42 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
 
-
 @Configuration
-@Import({RestHighLevelClientFactory.class, IndexConventionFactory.class})
+@Import({BaseElasticSearchComponentsFactory.class})
 public class ElasticSearchSystemMetadataServiceFactory {
   @Autowired
-  @Qualifier("elasticSearchRestHighLevelClient")
-  private RestHighLevelClient searchClient;
+  @Qualifier("baseElasticSearchComponents")
+  private BaseElasticSearchComponentsFactory.BaseElasticSearchComponents components;
 
-  @Autowired
-  @Qualifier(IndexConventionFactory.INDEX_CONVENTION_BEAN)
-  private IndexConvention indexConvention;
+  @Autowired private SearchClusterRegistry searchClusterRegistry;
 
-  @Value("${ES_BULK_REQUESTS_LIMIT:1}")
-  private Integer bulkRequestsLimit;
-
-  @Value("${ES_BULK_FLUSH_PERIOD:1}")
-  private Integer bulkFlushPeriod;
-
-  @Value("${ES_BULK_NUM_RETRIES:3}")
-  private Integer numRetries;
-
-  @Value("${ES_BULK_RETRY_INTERVAL:1}")
-  private Long retryInterval;
+  @Bean(name = "esSystemMetadataDAO")
+  @Nonnull
+  public ESSystemMetadataDAO esSystemMetadataDAO(
+      final ConfigurationProvider configurationProvider) {
+    return new ESSystemMetadataDAO(
+        searchClusterRegistry.clientFor(SearchComponent.SYSTEM_METADATA),
+        components.getIndexConvention(),
+        searchClusterRegistry.bulkProcessorFor(SearchComponent.SYSTEM_METADATA),
+        searchClusterRegistry
+            .configFor(SearchComponent.SYSTEM_METADATA)
+            .getBulkProcessor()
+            .getNumRetries(),
+        configurationProvider.getSystemMetadataService());
+  }
 
   @Bean(name = "elasticSearchSystemMetadataService")
   @Nonnull
-  protected ElasticSearchSystemMetadataService getInstance() {
+  protected ElasticSearchSystemMetadataService getInstance(
+      @Qualifier("esSystemMetadataDAO") final ESSystemMetadataDAO esSystemMetadataDAO,
+      @Value("${elasticsearch.entityIndex.v2.idHashAlgo}") final String elasticIdHashAlgo,
+      final ConfigurationProvider configurationProvider) {
     return new ElasticSearchSystemMetadataService(
-        searchClient,
-        indexConvention,
-        new ESSystemMetadataDAO(
-            searchClient,
-            indexConvention,
-            bulkRequestsLimit,
-            bulkFlushPeriod,
-            numRetries,
-            retryInterval)
-    );
+        searchClusterRegistry.bulkProcessorFor(SearchComponent.SYSTEM_METADATA),
+        components.getIndexConvention(),
+        esSystemMetadataDAO,
+        searchClusterRegistry.indexBuilderFor(SearchComponent.SYSTEM_METADATA),
+        elasticIdHashAlgo,
+        configurationProvider.getSystemMetadataService());
   }
 }

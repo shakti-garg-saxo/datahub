@@ -1,7 +1,6 @@
 package com.linkedin.gms.factory.common;
 
 import java.util.concurrent.TimeUnit;
-
 import org.neo4j.driver.AuthTokens;
 import org.neo4j.driver.Config;
 import org.neo4j.driver.Driver;
@@ -12,32 +11,32 @@ import org.springframework.context.annotation.Configuration;
 
 @Configuration
 public class Neo4jDriverFactory {
-  @Value("${NEO4J_USERNAME:neo4j}")
+  @Value("${neo4j.username}")
   private String username;
 
-  @Value("${NEO4J_PASSWORD:datahub}")
+  @Value("${neo4j.password}")
   private String password;
 
-  @Value("${NEO4J_URI:bolt://localhost}")
+  @Value("${neo4j.uri}")
   private String uri;
 
-  @Value("${NEO4J_MAX_CONNECTION_POOL_SIZE:100}")
+  @Value("${neo4j.maxConnectionPoolSize}")
   private Integer neo4jMaxConnectionPoolSize;
 
-  @Value("${NEO4J_MAX_CONNECTION_ACQUISITION_TIMEOUT_IN_SECONDS:60}")
+  @Value("${neo4j.maxConnectionAcquisitionTimeout}")
   private Long neo4jMaxConnectionAcquisitionTimeout;
 
   // Kept for sake of backwards compatibility. Instead use NEO4j_MAX_CONNECTION_LIFETIME_IN_SECONDS
   @Value("${NEO4j_MAX_CONNECTION_LIFETIME_IN_HOURS:#{null}}")
   private Long neo4jMaxConnectionLifetimeInHours;
 
-  @Value("${NEO4j_MAX_CONNECTION_LIFETIME_IN_SECONDS:3600}")
+  @Value("${neo4j.maxConnectionLifetimeInSeconds}")
   private Long neo4jMaxConnectionLifetimeInSeconds;
 
-  @Value("${NEO4J_MAX_TRANSACTION_RETRY_TIME_IN_SECONDS:30}")
+  @Value("${neo4j.maxTransactionRetryTime}")
   private Long neo4jMaxTransactionRetryTime;
 
-  @Value("${NEO4J_CONNECTION_LIVENESS_CHECK_TIMEOUT_IN_SECONDS:-1}")
+  @Value("${neo4j.connectionLivenessCheckTimeout}")
   private Long neo4jConnectionLivenessCheckTimeout;
 
   @Bean(name = "neo4jDriver")
@@ -45,10 +44,12 @@ public class Neo4jDriverFactory {
 
     Config.ConfigBuilder builder = Config.builder();
     builder.withMaxConnectionPoolSize(neo4jMaxConnectionPoolSize);
-    builder.withConnectionAcquisitionTimeout(neo4jMaxConnectionAcquisitionTimeout, TimeUnit.SECONDS);
+    builder.withConnectionAcquisitionTimeout(
+        neo4jMaxConnectionAcquisitionTimeout, TimeUnit.SECONDS);
     builder.withMaxConnectionLifetime(neo4jMaxConnectionLifetime(), TimeUnit.SECONDS);
     builder.withMaxTransactionRetryTime(neo4jMaxTransactionRetryTime, TimeUnit.SECONDS);
-    builder.withConnectionLivenessCheckTimeout(neo4jConnectionLivenessCheckTimeout, TimeUnit.SECONDS);
+    builder.withConnectionLivenessCheckTimeout(
+        neo4jConnectionLivenessCheckTimeout, TimeUnit.SECONDS);
 
     return GraphDatabase.driver(uri, AuthTokens.basic(username, password), builder.build());
   }

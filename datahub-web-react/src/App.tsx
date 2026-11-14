@@ -1,68 +1,121 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import Cookies from 'js-cookie';
-import { message } from 'antd';
-import { BrowserRouter as Router } from 'react-router-dom';
-import { ApolloClient, ApolloProvider, createHttpLink, InMemoryCache, ServerError } from '@apollo/client';
-import { onError } from '@apollo/client/link/error';
-import { ThemeProvider } from 'styled-components';
+import '@src/App.less';
+import '@src/AppV2.less';
 
-import './App.less';
-import { Routes } from './app/Routes';
-import EntityRegistry from './app/entity/EntityRegistry';
-import { DashboardEntity } from './app/entity/dashboard/DashboardEntity';
-import { ChartEntity } from './app/entity/chart/ChartEntity';
-import { UserEntity } from './app/entity/user/User';
-import { GroupEntity } from './app/entity/group/Group';
-import { DatasetEntity } from './app/entity/dataset/DatasetEntity';
-import { DataFlowEntity } from './app/entity/dataFlow/DataFlowEntity';
-import { DataJobEntity } from './app/entity/dataJob/DataJobEntity';
-import { TagEntity } from './app/entity/tag/Tag';
-import { EntityRegistryContext } from './entityRegistryContext';
-import { Theme } from './conf/theme/types';
-import defaultThemeConfig from './conf/theme/theme_light.config.json';
-import { PageRoutes } from './conf/Global';
-import { isLoggedInVar } from './app/auth/checkAuthStatus';
-import { GlobalCfg } from './conf';
-import { GlossaryTermEntity } from './app/entity/glossaryTerm/GlossaryTermEntity';
-import { MLFeatureEntity } from './app/entity/mlFeature/MLFeatureEntity';
-import { MLPrimaryKeyEntity } from './app/entity/mlPrimaryKey/MLPrimaryKeyEntity';
-import { MLFeatureTableEntity } from './app/entity/mlFeatureTable/MLFeatureTableEntity';
-import { MLModelEntity } from './app/entity/mlModel/MLModelEntity';
-import { MLModelGroupEntity } from './app/entity/mlModelGroup/MLModelGroupEntity';
+import { ApolloClient, ApolloLink, ApolloProvider, InMemoryCache, ServerError, createHttpLink } from '@apollo/client';
+import { onError } from '@apollo/client/link/error';
+import Cookies from 'js-cookie';
+import React, { Suspense } from 'react';
+import { Helmet, HelmetProvider } from 'react-helmet-async';
+import { BrowserRouter as Router } from 'react-router-dom';
+import { StyleSheetManager } from 'styled-components';
+
+import { GlobalStyles } from '@components/components/GlobalStyles';
+import { ToastRenderer } from '@components/components/Toast';
+
+import { Routes } from '@app/Routes';
+import { hideLineageInSearchCardsRef, showSeparateSiblingsRef } from '@app/appConfig/UpdateGlobalFlags';
+import { injectGlobalSearchVariables } from '@app/appConfig/injectedOperationVariables';
+import { isLoggedInVar } from '@app/auth/checkAuthStatus';
+import { FilesUploadingDownloadingLatencyTracker } from '@app/sharedV2/FilesUploadingDownloadingLatencyTracker';
+import { SuspenseGlobal } from '@app/sharedV2/SuspenseGlobal';
+import { ErrorCodes } from '@app/sharedV2/constants';
+import { loadIsDarkMode } from '@app/theme/useIsDarkMode';
+import { PageRoutes } from '@conf/Global';
+import CustomThemeProvider from '@src/CustomThemeProvider';
+import { installApolloPollingContextPatch } from '@src/apolloPolling';
+import { GlobalCfg } from '@src/conf';
+import { useCustomTheme } from '@src/customThemeContext';
+import { buildGraphqlHttpUri } from '@src/graphqlHttpUri';
+import { otelOperationLink } from '@src/otelApollo';
+import possibleTypesResult from '@src/possibleTypes.generated';
+import { getRuntimeBasePath, removeRuntimePath, resolveRuntimePath } from '@utils/runtimeBasePath';
 
 /*
     Construct Apollo Client
 */
-const httpLink = createHttpLink({ uri: '/api/v2/graphql' });
+const httpLink = createHttpLink({
+    uri: ({ operationName }) => buildGraphqlHttpUri(operationName),
+});
 
-const errorLink = onError(({ graphQLErrors, networkError }) => {
+const errorLink = onError((error) => {
+    const { networkError } = error;
     if (networkError) {
         const serverError = networkError as ServerError;
-        if (serverError.statusCode === 401) {
+        if (serverError.statusCode === ErrorCodes.Unauthorized) {
             isLoggedInVar(false);
             Cookies.remove(GlobalCfg.CLIENT_AUTH_COOKIE);
-            window.location.replace(PageRoutes.AUTHENTICATE);
+            const currentPath = removeRuntimePath(window.location.pathname) + window.location.search;
+            const authUrl = resolveRuntimePath(PageRoutes.AUTHENTICATE);
+            window.location.replace(`${authUrl}?redirect_uri=${encodeURIComponent(currentPath)}`);
         }
     }
-    if (graphQLErrors && graphQLErrors.length) {
-        const firstError = graphQLErrors[0];
-        const { extensions } = firstError;
-        console.log(firstError);
-        const errorCode = extensions && (extensions.code as number);
-        // Fallback in case the calling component does not handle.
-        message.error(`${firstError.message} (code ${errorCode})`, 3);
-    }
+    // Disabled behavior for now -> Components are expected to handle their errors.
+    //
+    // if (graphQLErrors && graphQLErrors.length) {
+    //     const firstError = graphQLErrors[0];
+    //     const { extensions } = firstError;
+    //     const errorCode = extensions && (extensions.code as number);
+    //     // Fallback in case the calling component does not handle.
+    //     toast.error(`${firstError.message} (code ${errorCode})`, { duration: 3 }); // TODO: Decide if we want this back.
+    // }
+});
+
+const injectVariablesLink = new ApolloLink((operation, forward) => {
+    // eslint-disable-next-line no-param-reassign
+    operation.variables = injectGlobalSearchVariables(operation.variables, {
+        showSeparateSiblings: showSeparateSiblingsRef.current,
+        hideLineageInSearchCards: hideLineageInSearchCardsRef.current,
+    });
+
+    return forward(operation);
 });
 
 const client = new ApolloClient({
     connectToDevTools: true,
-    link: errorLink.concat(httpLink),
-    cache: new InMemoryCache(),
+    link: ApolloLink.from([otelOperationLink, injectVariablesLink, errorLink, httpLink]),
+    cache: new InMemoryCache({
+        typePolicies: {
+            Query: {
+                fields: {
+                    latestProductUpdate: {
+                        keyArgs: ['locale'],
+                    },
+                    dataset: {
+                        merge: (oldObj, newObj) => {
+                            return { ...oldObj, ...newObj };
+                        },
+                    },
+                    entity: {
+                        merge: (oldObj, newObj) => {
+                            return { ...oldObj, ...newObj };
+                        },
+                    },
+                    // getGlossaryTerm and getRelatedTerms select different fields of the same term.
+                    // GlossaryTerm is not normalized, so without a merge the second write replaces
+                    // the first and the profile query refetches the whole term from the network.
+                    glossaryTerm: {
+                        merge: (oldObj, newObj) => {
+                            return { ...oldObj, ...newObj };
+                        },
+                    },
+                },
+            },
+            // Ingestion can assign the same id to models on different paths.
+            SemanticModel: {
+                keyFields: ['urn'],
+            },
+            // ProductUpdate.id is a release version, not a unique cache identity across locales.
+            ProductUpdate: {
+                keyFields: false,
+            },
+        },
+        // need to define possibleTypes to allow us to use Apollo cache with union types
+        possibleTypes: possibleTypesResult.possibleTypes,
+    }),
     credentials: 'include',
     defaultOptions: {
         watchQuery: {
             fetchPolicy: 'no-cache',
-            nextFetchPolicy: 'cache-first',
         },
         query: {
             fetchPolicy: 'no-cache',
@@ -70,45 +123,45 @@ const client = new ApolloClient({
     },
 });
 
-const App: React.VFC = () => {
-    const [dynamicThemeConfig, setDynamicThemeConfig] = useState<Theme>(defaultThemeConfig);
+// Forward NetworkStatus.poll onto operation.context so GraphQL tracing links can skip
+// timer-driven poll ticks without an op-name denylist. Must run after `new ApolloClient`.
+installApolloPollingContextPatch(client);
 
-    useEffect(() => {
-        import(`./conf/theme/${process.env.REACT_APP_THEME_CONFIG}`).then((theme) => {
-            setDynamicThemeConfig(theme);
-        });
-    }, []);
-
-    const entityRegistry = useMemo(() => {
-        const register = new EntityRegistry();
-        register.register(new DatasetEntity());
-        register.register(new DashboardEntity());
-        register.register(new ChartEntity());
-        register.register(new UserEntity());
-        register.register(new GroupEntity());
-        register.register(new TagEntity());
-        register.register(new DataFlowEntity());
-        register.register(new DataJobEntity());
-        register.register(new GlossaryTermEntity());
-        register.register(new MLFeatureEntity());
-        register.register(new MLPrimaryKeyEntity());
-        register.register(new MLFeatureTableEntity());
-        register.register(new MLModelEntity());
-        register.register(new MLModelGroupEntity());
-        return register;
-    }, []);
+export const InnerApp: React.VFC = () => {
+    const isDarkMode = loadIsDarkMode();
 
     return (
-        <ThemeProvider theme={dynamicThemeConfig}>
-            <Router>
-                <EntityRegistryContext.Provider value={entityRegistry}>
-                    <ApolloProvider client={client}>
-                        <Routes />
-                    </ApolloProvider>
-                </EntityRegistryContext.Provider>
-            </Router>
-        </ThemeProvider>
+        // Lazy route chunks add library CSS to <head> after styled-components' tag. Keeping our styles in
+        // <body> puts them after every stylesheet, so they win at equal specificity however late a chunk loads.
+        <StyleSheetManager target={document.body}>
+            <HelmetProvider>
+                <CustomThemeProvider isDarkMode={isDarkMode} injectGlobalStyles>
+                    <GlobalStyles />
+                    {/* ToastRenderer translates its own labels and sits above the router's boundary,
+                        so it needs one of its own while the locale bundle loads. */}
+                    <Suspense fallback={null}>
+                        <ToastRenderer />
+                    </Suspense>
+                    <FilesUploadingDownloadingLatencyTracker />
+
+                    <Helmet>
+                        <title>{useCustomTheme().theme?.content?.title}</title>
+                    </Helmet>
+                    <Router basename={getRuntimeBasePath()}>
+                        <Suspense fallback={<SuspenseGlobal />}>
+                            <Routes />
+                        </Suspense>
+                    </Router>
+                </CustomThemeProvider>
+            </HelmetProvider>
+        </StyleSheetManager>
     );
 };
 
-export default App;
+export const App: React.VFC = () => {
+    return (
+        <ApolloProvider client={client}>
+            <InnerApp />
+        </ApolloProvider>
+    );
+};

@@ -1,7 +1,7 @@
 # SchemaFieldPath Specification (Version 2)
 
 This document outlines the formal specification for the fieldPath member of
-the [SchemaField](https://github.com/linkedin/datahub/blob/master/metadata-models/src/main/pegasus/com/linkedin/schema/SchemaField.pdl)
+the [SchemaField](https://github.com/datahub-project/datahub/blob/master/metadata-models/src/main/pegasus/com/linkedin/schema/SchemaField.pdl)
 model. This specification (version 2) takes into account the unique requirements of supporting a wide variety of nested
 types, unions and optional fields and is a substantial improvement over the current implementation (version 1).
 
@@ -9,13 +9,13 @@ types, unions and optional fields and is a substantial improvement over the curr
 
 The `fieldPath` field is currently used by datahub for not just rendering the schema fields in the UI, but also as a
 primary identifier of a field in other places such
-as [EditableSchemaFieldInfo](https://github.com/linkedin/datahub/blob/master/metadata-models/src/main/pegasus/com/linkedin/schema/EditableSchemaFieldInfo.pdl#L12),
+as [EditableSchemaFieldInfo](https://github.com/datahub-project/datahub/blob/master/metadata-models/src/main/pegasus/com/linkedin/schema/EditableSchemaFieldInfo.pdl#L12),
 usage stats and data profiles. Therefore, it must satisfy the following requirements.
 
-* must be unique across all fields within a schema.
-* make schema navigation in the UI more intuitive.
-* allow for identifying the type of schema the field is part of, such as a `key-schema` or a `value-schema`.
-* allow for future-evolution
+- must be unique across all fields within a schema.
+- make schema navigation in the UI more intuitive.
+- allow for identifying the type of schema the field is part of, such as a `key-schema` or a `value-schema`.
+- allow for future-evolution
 
 ## Existing Convention(v1)
 
@@ -102,8 +102,11 @@ unique_v2_field_paths = [
   "[version=2.0].[type=string]"
 ]
 ```
+
 ### Records
+
 **Simple Record**
+
 ```python
 avro_schema = """
 {
@@ -131,7 +134,9 @@ unique_v2_field_paths = [
     "[version=2.0].[type=E].[type=string].b",
 ]
 ```
+
 **Nested Record**
+
 ```python
 avro_schema = """
 {
@@ -159,6 +164,7 @@ unique_v2_field_paths = [
 ```
 
 **Recursive Record**
+
 ```python
 avro_schema = """
 {
@@ -208,7 +214,9 @@ unique_v2_field_paths = [
  "[version=2.0].[type=TreeNode].[type=array].[type=TreeNode].children",
 ]
 ```
+
 ### Unions
+
 ```python
 avro_schema = """
 {
@@ -238,7 +246,9 @@ unique_v2_field_paths: List[str] = [
     "[version=2.0].[key=True].[type=ABUnion].[type=union].[type=B].a.[type=string].f",
 ]
 ```
+
 ### Arrays
+
 ```python
 avro_schema = """
 {
@@ -272,7 +282,9 @@ unique_v2_field_paths: List[str] = [
   "[version=2.0].[type=NestedArray].[type=array].[type=array].[type=Foo].ar.[type=long].a",
 ]
 ```
+
 ### Maps
+
 ```python
 avro_schema = """
 {
@@ -296,7 +308,9 @@ unique_v2_field_paths = [
 
 
 ```
+
 ### Mixed Complex Type Examples
+
 ```python
 # Combines arrays, unions and records.
 avro_schema = """
@@ -344,7 +358,7 @@ unique_v2_field_paths: List[str] = [
 ```
 
 For more examples, see
-the [unit-tests for AvroToMceSchemaConverter](https://github.com/linkedin/datahub/blob/master/metadata-ingestion/tests/unit/test_schema_util.py).
+the [unit-tests for AvroToMceSchemaConverter](https://github.com/datahub-project/datahub/blob/master/metadata-ingestion/tests/unit/test_schema_util.py).
 
 ### Backward-compatibility
 

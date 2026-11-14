@@ -1,5 +1,6 @@
 namespace com.linkedin.ml.metadata
 
+import com.linkedin.common.CustomProperties
 import com.linkedin.common.Urn
 import com.linkedin.common.MLFeatureDataType
 import com.linkedin.common.VersionTag
@@ -8,13 +9,27 @@ import com.linkedin.common.VersionTag
  * Properties associated with a MLPrimaryKey
  */
 @Aspect = {
-  "name": "mlPrimaryKeyProperties"
+  "name": "mlPrimaryKeyProperties",
+  "schemaVersion": 2
 }
-record MLPrimaryKeyProperties {
+record MLPrimaryKeyProperties includes CustomProperties {
 
   /**
    * Documentation of the MLPrimaryKey
    */
+  @Searchable = {
+    "fieldType": "TEXT",
+    "hasValuesFieldName": "hasDescription",
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
   description: optional string
 
   /**
@@ -33,7 +48,8 @@ record MLPrimaryKeyProperties {
   @Relationship = {
     "/*": {
       "name": "DerivedFrom",
-      "entityTypes": [ "dataset" ]
+      "entityTypes": [ "dataset" ],
+      "isLineage": true
     }
   }
   sources: array[Urn]

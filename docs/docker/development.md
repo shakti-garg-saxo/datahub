@@ -1,76 +1,155 @@
 # Using Docker Images During Development
 
-We've created a special `docker-compose.dev.yml` override file that should configure docker images to be easier to use
-during development.
+Local development uses [Docker Compose profiles](../../docker/profiles/docker-compose.yml) under `docker/profiles/`. The `debug`
+profile mounts locally built artifacts into containers tagged `debug`, so you avoid rebuilding images on every change.
 
-Normally, you'd rebuild your images from scratch with `docker-compose build` (or `docker-compose up --build`). However,
-this takes way too long for development. It has to copy the entire repo to each image and rebuild it there.
+We highly recommend `./gradlew quickstartDebug` (or [`scripts/dev/datahub-dev.sh`](../../scripts/dev/datahub-dev.sh) for agent workflows).
 
-The `docker-compose.dev.yml` file bypasses this problem by mounting binaries, startup scripts, and other data to
-special, slimmed down images (of which the Dockerfile is usually defined in `<service>/debug/Dockerfile`). 
+```shell
+./gradlew quickstartDebug
+```
 
-These dev images will use your _locally built code_, so you'll need to build locally with gradle first
-(and every time you want to update the instance). Building locally should be much faster than building on Docker.
+This task is defined in `docker/build.gradle` and executes the following steps:
 
-We highly recommend you just invoke the `docker/dev.sh` script we've included. It is pretty small if you want to read it
-to see what it does, but it ends up using our `docker-compose.dev.yml` file.
+1. Builds all required artifacts to run DataHub. This includes both application code such as the GMS war, the frontend
+   distribution zip which contains javascript, as well as secondary support docker containers.
+
+1. Locally builds Docker images with the expected `debug` tag required by the docker compose files.
+
+1. Starts the `debug` profile compose stack to mount local files directly in the containers with remote debugging ports enabled.
+
+Once the `debug` docker images are constructed you'll see images similar to the following:
+
+```shell
+acryldata/datahub-frontend-react                 debug              e52fef698025   28 minutes ago   763MB
+acryldata/datahub-gms                            debug              ea2b0a8ea115   56 minutes ago   408MB
+acryldata/datahub-upgrade                       debug              322377a7a21d   56 minutes ago   463MB
+```
+
+At this point it is possible to view the DataHub UI at `http://localhost:9002` as you normally would with quickstart.
+
+Like `quickstartDebug`, there are a few other tasks that bring up a different set of containers, for example
+`quickstartDebugConsumers` will also bring up mce-consumer and mae-consumer, `quickstartPgDebug` uses Postgres,
+and `quickstartOS3Debug` uses OpenSearch 3.x with debug bind-mounts. For CI or image-based
+OpenSearch 3.x, use `./gradlew quickstartOS3` (`quickstart-opensearch3` profile). To pin OpenSearch
+2.x, use `./gradlew quickstartOS2` or `quickstartOS2Debug`. Unversioned `quickstart` /
+`quickstartDebug` still default to OpenSearch 2.x.
+
+## Reloading
+
+Next, perform the desired modifications
+
+To see these changes in the deployment, a rebuilt of modified artifacts and a restart of the container(s) is required to run with the updated code.
+The restart can be performed using following gradle task.
+
+```shell
+./gradlew :docker:reload
+```
+
+This single task will build the artifacts that were modified and restart only those containers that were affected by the rebuilt artifacts.
+
+`reload` is generally much faster than re-running `quickstartDebug` and is recommended after an initial bringup of all services via `quickstartDebug` followed
+by loading the incremental changes using `reload`.
+
+If there are significant changes to the code, for example due to pulling the latest code, it is recommended to start with a `quickstartDebug` and then iterate using `reload`
+
+# Setting environment variables via env files
+
+You can define different sets of environment variables for all the containers in an env file. The env files must be located in the `docker/profiles` folder.
+To use the env file, run
+
+```shell
+DATAHUB_LOCAL_COMMON_ENV=my-settings.env ./gradlew quickstartDebug
+```
+
+The `reload` process continues to work, but the restarted containers will use the same settings that were present at the time of running `./gradlew quickstartDebug`.
+
+If you need to reload the containers with a different env file or changes made to the env file, a task `reloadEnv` builds the artifacts that have code changes
+and recreates all the containers that refer to these the env file via the DATAHUB_LOCAL_COMMON_ENV environment variable.
+
+The `reload` and `reloadEnv` tasks can only be run after running one of the debug variants of a quickstart task like `quickstartDebug`
+
+## Start/Stop
+
+The following commands can pause the debugging environment to release resources when not needed.
+
+Pause containers and free resources.
+
+```shell
+docker compose --project-directory docker/profiles -p datahub stop
+```
+
+Resume containers for further debugging.
+
+```shell
+docker compose --project-directory docker/profiles -p datahub start
+```
+
+## Cleanup
+
+To completely remove containers and volumes for a specific project, you can use the nuke tasks:
+
+```shell
+# Remove containers and volumes for specific projects
+./gradlew quickstartNuke          # For default project (datahub)
+./gradlew quickstartDebugNuke     # For debug project (datahub)
+```
+
+> **Note**: These are Gradle nuke tasks. For CLI-based cleanup, see `datahub docker nuke` in the [quickstart guide](../quickstart.md).
 
 ## Debugging
 
-The default dev images, while set up to use your local code, do not enable debugging by default. To enable debugging,
-you need to make two small edits (don't check these changes in!).
+The default debugging process uses your local code and enables debugging by default for both GMS and the frontend. Attach
+to the instance using your IDE by using its Remote Java Debugging features.
 
-- Add the JVM debug flags to the environment file for the service.
-- Assign the port in the docker-compose file.
+Environment variables control the debugging ports for GMS and the frontend.
 
-For example, to debug `datahub-gms`:
+- `DATAHUB_MAPPED_GMS_DEBUG_PORT` - Default: 5001
+- `DATAHUB_MAPPED_FRONTEND_DEBUG_PORT` - Default: 5002
 
-```shell
-# Add this line to docker/datahub-gms/env/docker.env. You can change the port and/or change suspend=n to y.
-JAVA_TOOL_OPTIONS=-agentlib:jdwp=transport=dt_socket,address=5005,server=y,suspend=n
-```
+### IntelliJ Remote Debug Configuration
 
-```yml
-# Change the definition in docker/docker-compose.dev.yml to this
-  datahub-gms:
-    image: linkedin/datahub-gms:debug
-    build:
-      context: datahub-gms/debug
-      dockerfile: Dockerfile
-    ports:             # <--- Add this line
-      - "5005:5005"    # <--- And this line. Must match port from environment file.
-    volumes:
-      - ./datahub-gms/start.sh:/datahub/datahub-gms/scripts/start.sh
-      - ../gms/war/build/libs/:/datahub/datahub-gms/bin
-```
+The screenshot shows an example configuration for IntelliJ using the default GMS debugging port of 5001.
 
+<p align="center">
+  <img width="70%"  src="https://raw.githubusercontent.com/datahub-project/static-assets/main/imgs/development/intellij-remote-debug.png"/>
+</p>
 
 ## Tips for People New To Docker
 
-## Accessing Logs
+### Accessing Logs
 
 It is highly recommended you use [Docker Desktop's dashboard](https://www.docker.com/products/docker-desktop) to access service logs. If you double click an image it will pull up the logs for you.
 
-### Conflicting containers
+### Quickstart Conflicts
 
-If you ran `docker/quickstart.sh` before, your machine may already have a container for DataHub. If you want to run
-`docker/dev.sh` instead, ensure that the old container is removed by running `docker container prune`. The opposite also
-applies.
+If you run quickstart, use `./gradlew quickstartDebug` to return to using the debugging containers.
 
-> Note this only removes containers, not images. Should still be fast to switch between these once you've launched both
-> at least once.
+### Docker Prune
+
+If you run into disk space issues and prune the images & containers you will need to execute the `./gradlew quickstartDebug`
+again.
+
+### System Update
+
+The `datahub-upgrade` job will not block the startup of the other containers as it normally
+does in a quickstart or production environment. Normally this is process is required when making updates which
+require Elasticsearch reindexing. If reindexing is required, the UI will render but may temporarily return errors
+until this job finishes.
 
 ### Running a specific service
 
-`docker-compose up` will launch all services in the configuration, including dependencies, unless they're already
-running. If you, for some reason, wish to change this behavior, check out these example commands.
+`docker compose up` launches all services in the profile, including dependencies, unless they are already running.
+To start only GMS (and its dependencies) under the debug profile:
 
+```shell
+docker compose --project-directory docker/profiles --profile debug -p datahub up datahub-gms
 ```
-docker-compose -p datahub -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.dev.yml up datahub-gms
-```
-Will only start `datahub-gms` and its dependencies.
 
+To start only GMS without dependencies:
+
+```shell
+docker compose --project-directory docker/profiles --profile debug -p datahub up --no-deps datahub-gms
 ```
-docker-compose -p datahub -f docker-compose.yml -f docker-compose.override.yml -f docker-compose.dev.yml up --no-deps datahub-gms
-```
-Will only start `datahub-gms`, without dependencies.
+
+See `docker/profiles/README.md` in the repository for available profiles.

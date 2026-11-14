@@ -1,5 +1,6 @@
 namespace com.linkedin.glossary
 
+import com.linkedin.common.CustomProperties
 import com.linkedin.common.GlossaryNodeUrn
 
 /**
@@ -8,16 +9,83 @@ import com.linkedin.common.GlossaryNodeUrn
 @Aspect = {
    "name": "glossaryNodeInfo"
 }
-record GlossaryNodeInfo {
+record GlossaryNodeInfo includes CustomProperties {
 
   /**
    * Definition of business node
    */
-  @Searchable = {}
+  @Searchable = {
+    "fieldType": "TEXT",
+    "hasValuesFieldName": "hasDescription",
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
   definition: string
 
   /**
    * Parent node of the glossary term
    */
+  @Relationship = {
+    "name": "IsPartOf",
+    "entityTypes": [ "glossaryNode" ],
+  }
+  @Searchable = {
+    "fieldName": "parentNode",
+    "fieldType": "URN",
+    "hasValuesFieldName": "hasParentNode",
+    "v3": {
+      "searchLabel": "parent",
+      "hasValuesFieldName": "hasParent",
+    }
+  }
   parentNode: optional GlossaryNodeUrn
+
+    /**
+     * Display name of the node
+     */
+    @Searchable = {
+      "fieldName": "displayName",
+      "fieldType": "WORD_GRAM",
+      "enableAutocomplete": true,
+      "boostScore": 10.0,
+      "fieldNameAliases": [ "_entityName" ],
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "name",
+        "lowercase": true,
+        "mappings": [
+          { "type": "KEYWORD" },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      }
+    }
+    name: optional string
+
+    /**
+     * Optional id for the GlossaryNode
+     */
+    @Searchable = {
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "id",
+        "boostScore": 2.0,
+        "lowercase": true,
+        "mappings": [
+          { "type": "KEYWORD" },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      },
+      "fieldType": "TEXT_PARTIAL",
+    }
+    id: optional string
+
 }

@@ -1,5 +1,4 @@
 ---
-version: '3.5'
 services:
   datahub-mae-consumer:
     environment:
@@ -11,6 +10,8 @@ services:
       - OTEL_SERVICE_NAME=datahub-mae-consumer
     ports:
       - "4318"
+    expose:
+      - 4319
 
   datahub-mce-consumer:
     environment:
@@ -22,3 +23,5 @@ services:
       - OTEL_SERVICE_NAME=datahub-mce-consumer
     ports:
       - "4318"
+    expose:
+      - 4319

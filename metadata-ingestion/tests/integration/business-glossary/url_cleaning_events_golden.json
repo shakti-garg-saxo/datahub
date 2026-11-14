@@ -1,0 +1,510 @@
+[
+{
+    "entityType": "glossaryNode",
+    "entityUrn": "urn:li:glossaryNode:URL-Testing",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryNodeInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "definition": "Testing URL cleaning functionality",
+            "name": "URL Testing"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryNode",
+    "entityUrn": "urn:li:glossaryNode:URL-Testing",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Basic-Term-With-Spaces",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "Basic Term With Spaces",
+            "definition": "Testing basic space replacement",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Basic-Term-With-Spaces",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.SpecialCharacters",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "Special@#$Characters!",
+            "definition": "Testing special character removal",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.SpecialCharacters",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.MixedCase-Term",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "MixedCase Term",
+            "definition": "Testing case preservation",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.MixedCase-Term",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Multiple-Spaces",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "Multiple   Spaces",
+            "definition": "Testing multiple space handling",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Multiple-Spaces",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Term.With.Special-Chars",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "Term.With.Special-Chars",
+            "definition": "Testing mixed special characters",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Term.With.Special-Chars",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Special-At-Start",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "@#$Special At Start",
+            "definition": "Testing leading special characters",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Special-At-Start",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Numbers-123",
+    "changeType": "UPSERT",
+    "aspectName": "glossaryTermInfo",
+    "aspect": {
+        "json": {
+            "customProperties": {},
+            "name": "Numbers 123",
+            "definition": "Testing numbers in term names",
+            "parentNode": "urn:li:glossaryNode:URL-Testing",
+            "termSource": "INTERNAL",
+            "sourceRef": "DataHub",
+            "sourceUrl": "https://github.com/datahub-project/datahub/"
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Numbers-123",
+    "changeType": "UPSERT",
+    "aspectName": "ownership",
+    "aspect": {
+        "json": {
+            "owners": [
+                {
+                    "owner": "urn:li:corpuser:mjames",
+                    "type": "DEVELOPER"
+                }
+            ],
+            "ownerTypes": {},
+            "lastModified": {
+                "time": 0,
+                "actor": "urn:li:corpuser:unknown"
+            }
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryNode",
+    "entityUrn": "urn:li:glossaryNode:URL-Testing",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Basic-Term-With-Spaces",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.MixedCase-Term",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Multiple-Spaces",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Numbers-123",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Special-At-Start",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.SpecialCharacters",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+},
+{
+    "entityType": "glossaryTerm",
+    "entityUrn": "urn:li:glossaryTerm:URL-Testing.Term.With.Special-Chars",
+    "changeType": "UPSERT",
+    "aspectName": "status",
+    "aspect": {
+        "json": {
+            "removed": false
+        }
+    },
+    "systemMetadata": {
+        "lastObserved": 1586847600000,
+        "runId": "datahub-business-glossary-2020_04_14-07_00_00-4alqef",
+        "lastRunId": "no-run-id-provided"
+    }
+}
+]

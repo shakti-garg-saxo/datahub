@@ -2,6 +2,8 @@ namespace com.linkedin.glossary
 
 import com.linkedin.common.Url
 import com.linkedin.common.GlossaryNodeUrn
+import com.linkedin.common.CustomProperties
+import com.linkedin.schema.PrimitiveValueDataType
 
 /**
  * Properties associated with a GlossaryTerm
@@ -9,17 +11,81 @@ import com.linkedin.common.GlossaryNodeUrn
 @Aspect = {
    "name": "glossaryTermInfo"
 }
-record GlossaryTermInfo {
+record GlossaryTermInfo includes CustomProperties {
+  /**
+   * Optional id for the term
+   */
+  @Searchable = {
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "id",
+      "boostScore": 2.0,
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    },
+    "fieldType": "TEXT_PARTIAL",
+  }
+  id: optional string
 
   /**
-   * Definition of business term
+   * Display name of the term
    */
-  @Searchable = {}
+  @Searchable = {
+    "fieldType": "WORD_GRAM",
+    "enableAutocomplete": true,
+    "boostScore": 10.0,
+    "fieldNameAliases": [ "_entityName" ],
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  name: optional string
+
+  /**
+   * Definition of business term.
+   */
+  @Searchable = {
+    "fieldType": "TEXT",
+    "hasValuesFieldName": "hasDescription",
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
   definition: string
 
   /**
    * Parent node of the glossary term
    */
+  @Relationship = {
+    "name": "IsPartOf",
+    "entityTypes": [ "glossaryNode" ],
+  }
+  @Searchable = {
+    "fieldName": "parentNode",
+    "fieldType": "URN",
+    "hasValuesFieldName": "hasParentNode",
+    "v3": {
+      "searchLabel": "parent",
+      "hasValuesFieldName": "hasParent",
+    }
+  }
   parentNode: optional GlossaryNodeUrn
 
   /**
@@ -44,12 +110,9 @@ record GlossaryTermInfo {
   sourceUrl: optional Url
 
   /**
-   * A key-value map to capture any other non-standardized properties for the glossary term
-   */
-  customProperties: map[string, string] = { }
-
-  /**
    * Schema definition of the glossary term
    */
+  @deprecated
   rawSchema: optional string
+
 }

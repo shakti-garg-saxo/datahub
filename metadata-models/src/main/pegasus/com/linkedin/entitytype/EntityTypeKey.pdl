@@ -1,0 +1,24 @@
+namespace com.linkedin.entitytype
+
+@Aspect = {
+    "name": "entityTypeKey"
+}
+record EntityTypeKey {
+    /**
+     * A unique id for an entity type. Usually this will be a unique namespace + entity name.
+     */
+    @Searchable = {
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "id",
+        "boostScore": 2.0,
+        "lowercase": true,
+        "mappings": [
+          { "type": "KEYWORD" },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      }
+    }
+    id: string
+}

@@ -4,7 +4,8 @@ namespace com.linkedin.common
  * Deprecation status of an entity
  */
 @Aspect = {
-  "name": "deprecation"
+  "name": "deprecation",
+  "schemaVersion": 2
 }
 record Deprecation {
 
@@ -13,7 +14,9 @@ record Deprecation {
    */
   @Searchable = {
     "fieldType": "BOOLEAN",
-    "weightsPerFieldValue": { "true": 0.5 }
+    "weightsPerFieldValue": { "true": 0.5 },
+    "addToFilters": true,
+    "filterNameOverride": "Deprecated"
   }
   deprecated: boolean
 
@@ -25,10 +28,21 @@ record Deprecation {
   /**
    * Additional information about the entity deprecation plan, such as the wiki, doc, RB.
    */
+  @Searchable = {
+    "fieldType": "TEXT",
+    "queryByDefault": false,
+    "sanitizeRichText": true,
+    "v3": {
+      "queryByDefault": true
+    }
+  }
   note: string
 
   /**
-   * The corpuser URN which will be credited for modifying this deprecation content.
+   * The user URN which will be credited for modifying this deprecation content.
    */
-  actor: CorpuserUrn
+  actor: Urn
+
+  replacement: optional Urn
+  
 }

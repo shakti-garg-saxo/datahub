@@ -1,0 +1,65 @@
+namespace com.linkedin.entitytype
+
+@Aspect = {
+    "name": "entityTypeInfo",
+    "schemaVersion": 2
+}
+record EntityTypeInfo {
+    /**
+     * The fully qualified name for the entity type, which usually consists of a namespace
+     * plus an identifier or name, e.g. datahub.dataset
+     */
+    @Searchable = {
+      "fieldType": "KEYWORD",
+      "queryByDefault": true,
+      "boostScore": 10.0,
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "qualifiedName",
+        "lowercase": true,
+        "mappings": [
+          { "type": "KEYWORD" },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      }
+    }
+    qualifiedName: string
+
+    /**
+     * The display name for the Entity Type.
+     */
+    @Searchable = {
+      "fieldType": "WORD_GRAM",
+      "boostScore": 10.0,
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "name",
+        "lowercase": true,
+        "mappings": [
+          { "type": "KEYWORD" },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      }
+    }
+    displayName: optional string
+
+    /**
+     * A description for the Entity Type: what is it for?
+     */
+    @Searchable = {
+      "fieldType": "TEXT",
+      "hasValuesFieldName": "hasDescription",
+      "v3": {
+        "queryByDefault": true,
+        "searchLabel": "description",
+        "mappings": [
+          { "type": "KEYWORD", "index": false, "docValues": false },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      }
+    }
+    description: optional string
+}

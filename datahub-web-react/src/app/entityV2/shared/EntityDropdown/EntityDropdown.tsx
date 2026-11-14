@@ -1,0 +1,714 @@
+import { Menu, toast } from '@components';
+import { ClockCounterClockwise } from '@phosphor-icons/react/dist/csr/ClockCounterClockwise';
+import { Copy } from '@phosphor-icons/react/dist/csr/Copy';
+import { DotsThreeVertical } from '@phosphor-icons/react/dist/csr/DotsThreeVertical';
+import { Envelope } from '@phosphor-icons/react/dist/csr/Envelope';
+import { FlagBanner } from '@phosphor-icons/react/dist/csr/FlagBanner';
+import { FolderOpen } from '@phosphor-icons/react/dist/csr/FolderOpen';
+import { FolderPlus } from '@phosphor-icons/react/dist/csr/FolderPlus';
+import { GitBranch } from '@phosphor-icons/react/dist/csr/GitBranch';
+import { GitCommit } from '@phosphor-icons/react/dist/csr/GitCommit';
+import { Link } from '@phosphor-icons/react/dist/csr/Link';
+import { LinkBreak } from '@phosphor-icons/react/dist/csr/LinkBreak';
+import { MegaphoneSimple } from '@phosphor-icons/react/dist/csr/MegaphoneSimple';
+import { Pencil } from '@phosphor-icons/react/dist/csr/Pencil';
+import { PencilSimple } from '@phosphor-icons/react/dist/csr/PencilSimple';
+import { Plus } from '@phosphor-icons/react/dist/csr/Plus';
+import { Share } from '@phosphor-icons/react/dist/csr/Share';
+import { Trash } from '@phosphor-icons/react/dist/csr/Trash';
+import { Warning } from '@phosphor-icons/react/dist/csr/Warning';
+import qs from 'query-string';
+import React, { useCallback, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { Redirect, useHistory } from 'react-router';
+
+import { EventType } from '@app/analytics';
+import analytics from '@app/analytics/analytics';
+import { useUserContext } from '@app/context/useUserContext';
+import { useEntityContext } from '@app/entityV2/shared/EntityContext';
+import CreateGlossaryEntityModal from '@app/entityV2/shared/EntityDropdown/CreateGlossaryEntityModal';
+import CreateGlossaryTermVersionModal from '@app/entityV2/shared/EntityDropdown/CreateGlossaryTermVersionModal';
+import { DeprecatedMenuIcon } from '@app/entityV2/shared/EntityDropdown/DeprecatedMenuIcon';
+import EditGlossaryEntityModal from '@app/entityV2/shared/EntityDropdown/EditGlossaryEntityModal';
+import { EntityMenuItems } from '@app/entityV2/shared/EntityDropdown/EntityMenuActions';
+import LifecycleStageModal from '@app/entityV2/shared/EntityDropdown/LifecycleStageModal';
+import MoveEntityModal from '@app/entityV2/shared/EntityDropdown/MoveEntityModal';
+import { UpdateDeprecationModal } from '@app/entityV2/shared/EntityDropdown/UpdateDeprecationModal';
+import useDeleteEntity from '@app/entityV2/shared/EntityDropdown/useDeleteEntity';
+import {
+    DeprecationFormData,
+    useHandleDeprecateDomain,
+} from '@app/entityV2/shared/EntityDropdown/useHandleDeprecateDomain';
+import {
+    canCreateTermVersion,
+    getDeprecationMenuActions,
+    isDeleteDisabled,
+    isGlossaryTermVersion,
+    isMoveDisabled,
+    shouldDisplayChildDeletionWarning,
+} from '@app/entityV2/shared/EntityDropdown/utils';
+import LinkAssetVersionModal from '@app/entityV2/shared/EntityDropdown/versioning/LinkAssetVersionModal';
+import UnlinkAssetVersionModal from '@app/entityV2/shared/EntityDropdown/versioning/UnlinkAssetVersionModal';
+import CreateEntityAnnouncementModal from '@app/entityV2/shared/announce/CreateEntityAnnouncementModal';
+import { EntityTabPath } from '@app/entityV2/shared/constants';
+import { getEntityPath } from '@app/entityV2/shared/containers/profile/entityData';
+import { IncidentDetailDrawer } from '@app/entityV2/shared/lazyIncidentDetailDrawer';
+import HistorySidebar from '@app/entityV2/shared/tabs/Dataset/Schema/history/HistorySidebar';
+import { IncidentAction } from '@app/entityV2/shared/tabs/Incident/constant';
+import { DrawerType, GenericEntityProperties } from '@app/entityV2/shared/types';
+import { useIsSeparateSiblingsMode } from '@app/entityV2/shared/useIsSeparateSiblingsMode';
+import { getFirstSubType } from '@app/entityV2/shared/utils';
+import useGlossaryCreatePrivileges from '@app/glossaryV2/useGlossaryCreatePrivileges';
+import { getEntityProfileDeleteRedirectPath } from '@app/sharedV2/deleteUtils';
+import { useAppConfig, useIsNestedDomainsEnabled } from '@app/useAppConfig';
+import { useEntityRegistry } from '@app/useEntityRegistry';
+import { resolveRuntimePath } from '@utils/runtimeBasePath';
+
+import { useUpdateDeprecationMutation } from '@graphql/mutations.generated';
+import { Deprecation, EntityType } from '@types';
+
+// Tab path segment passed to getEntityPath — a route identifier, not user-visible copy.
+
+interface Options {
+    hideDeleteMessage?: boolean;
+    skipDeleteWait?: boolean;
+}
+
+interface Props {
+    urn: string;
+    entityType: EntityType;
+    entityData: GenericEntityProperties | null;
+    menuItems: Set<EntityMenuItems>;
+    options?: Options;
+    refetchForEntity?: () => void;
+    refetchForTerms?: () => void;
+    refetchForNodes?: () => void;
+    onDeleteEntity?: () => void;
+    onEditEntity?: () => void;
+    triggerType?: ('click' | 'contextMenu' | 'hover')[] | undefined;
+    refetchDeprecation?: (formData?: DeprecationFormData) => void;
+}
+
+const EntityDropdown = (props: Props) => {
+    const history = useHistory();
+    const { t } = useTranslation('entity.shared.entityDropdown');
+    const { t: tc } = useTranslation('common.actions');
+    const { t: tcf } = useTranslation('common.feedback');
+    const { t: ts } = useTranslation('shared.share');
+
+    // The menu closes as soon as an item is clicked, so a toast is the only confirmation
+    // the user can actually see.
+    const copyToClipboard = useCallback((value: string, confirmation: string) => {
+        navigator.clipboard.writeText(value);
+        toast.success(confirmation);
+    }, []);
+
+    const {
+        urn,
+        entityData,
+        entityType,
+        menuItems,
+        refetchForEntity,
+        refetchForTerms,
+        refetchForNodes,
+        onDeleteEntity: onDelete,
+        onEditEntity: onEdit,
+        options,
+        triggerType = ['click'],
+        refetchDeprecation,
+    } = props;
+    const { urn: entityProfileUrn, setDrawer } = useEntityContext();
+    const onEntityProfile = entityProfileUrn === urn;
+
+    const me = useUserContext();
+    const entityRegistry = useEntityRegistry();
+    const versioningEnabled = useAppConfig().config.featureFlags.entityVersioningEnabled;
+
+    const [updateDeprecation] = useUpdateDeprecationMutation();
+    const { handleDeprecateDomainComplete } = useHandleDeprecateDomain(urn);
+    const isHideSiblingMode = useIsSeparateSiblingsMode();
+    const isNestedDomainsEnabled = useIsNestedDomainsEnabled();
+    const { onDeleteEntity, hasBeenDeleted, DeleteConfirmationModal } = useDeleteEntity(
+        urn,
+        entityType,
+        entityData,
+        onDelete,
+        options?.hideDeleteMessage,
+        options?.skipDeleteWait,
+    );
+
+    const [isCreateTermModalVisible, setIsCreateTermModalVisible] = useState(false);
+    const [isCreateNodeModalVisible, setIsCreateNodeModalVisible] = useState(false);
+    const [isCloneEntityModalVisible, setIsCloneEntityModalVisible] = useState(false);
+    const [isEditGlossaryModalVisible, setIsEditGlossaryModalVisible] = useState(false);
+    const [isDeprecationModalVisible, setIsDeprecationModalVisible] = useState(false);
+    const [deprecationModalInitialValues, setDeprecationModalInitialValues] = useState<Deprecation | null>(null);
+    const [isEntityAnnouncementModalVisible, setIsEntityAnnouncementModalVisible] = useState(false);
+    const [isMoveModalVisible, setIsMoveModalVisible] = useState(false);
+    const [isRaiseIncidentModalVisible, setIsRaiseIncidentModalVisible] = useState(false);
+    const [isLinkAssetVersionModalVisible, setIsLinkAssetVersionModalVisible] = useState(false);
+    const [isUnlinkAssetVersionModalVisible, setIsUnlinkAssetVersionModalVisible] = useState(false);
+    const [isChangeHistoryOpen, setIsChangeHistoryOpen] = useState(false);
+    const [isNewVersionModalVisible, setIsNewVersionModalVisible] = useState(false);
+    const [isLifecycleStageModalVisible, setIsLifecycleStageModalVisible] = useState(false);
+    const canEditLifecycleStage = !!entityData?.privileges?.canEditLifecycleStage;
+
+    const handleUpdateDeprecation = async (deprecatedStatus: boolean) => {
+        toast.loading(tcf('updating'));
+        try {
+            await updateDeprecation({
+                variables: {
+                    input: {
+                        urn,
+                        deprecated: deprecatedStatus,
+                        note: '',
+                        decommissionTime: null,
+                    },
+                },
+            });
+            toast.destroy();
+            toast.success(
+                deprecatedStatus
+                    ? t('deprecation.markedDeprecatedSuccess')
+                    : t('deprecation.markedUnDeprecatedSuccess'),
+                { duration: 2 },
+            );
+            analytics.event({
+                type: EventType.SetDeprecation,
+                entityUrns: [urn],
+                deprecated: deprecatedStatus,
+            });
+            if (entityType === EntityType.Domain) {
+                handleDeprecateDomainComplete(deprecatedStatus);
+            } else if (!deprecatedStatus) {
+                // Mirror the deprecate-modal optimistic path for un-deprecate from this menu,
+                // so the badge and menu item flip immediately (no search refetch needed).
+                refetchDeprecation?.();
+            }
+        } catch (e: unknown) {
+            toast.destroy();
+            if (e instanceof Error) {
+                toast.error(t('deprecation.updateError', { errorMessage: e.message || '' }), { duration: 2 });
+            }
+        }
+        refetchForEntity?.();
+    };
+
+    const pageUrl = window.location.href;
+    const isGlossaryEntity = entityType === EntityType.GlossaryNode || entityType === EntityType.GlossaryTerm;
+    const isDomainEntity = entityType === EntityType.Domain;
+    const { canCreate: canCreateGlossaryEntity } = useGlossaryCreatePrivileges(
+        !!entityData?.privileges?.canManageChildren,
+    );
+    const isDomainMoveHidden = !isNestedDomainsEnabled && isDomainEntity;
+
+    /**
+     * A default path to redirect to if the entity is deleted.
+     */
+    const deleteRedirectPath = getEntityProfileDeleteRedirectPath(entityType, entityData);
+
+    // Build menu items for the new Menu component
+    const menuItemsList: any[] = [];
+
+    if (menuItems.has(EntityMenuItems.COPY_URL) && navigator.clipboard) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '0',
+            title: t('menuItem.copyUrl'),
+            icon: Link,
+            onClick: () => {
+                navigator.clipboard.writeText(pageUrl);
+                toast.info(t('menuItem.copiedUrl'), { duration: 1.2 });
+            },
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.UPDATE_DEPRECATION)) {
+        const deprecationActions = getDeprecationMenuActions(
+            !!entityData?.deprecation?.deprecated,
+            entityData?.privileges,
+        );
+        deprecationActions.forEach((action) => {
+            if (action === 'markDeprecated') {
+                menuItemsList.push({
+                    type: 'item' as const,
+                    key: '1',
+                    title: t('deprecation.markDeprecated'),
+                    icon: DeprecatedMenuIcon,
+                    'data-testid': 'entity-menu-deprecate-button',
+                    onClick: () => {
+                        setDeprecationModalInitialValues(null);
+                        setIsDeprecationModalVisible(true);
+                    },
+                });
+            } else if (action === 'editDeprecated') {
+                menuItemsList.push({
+                    type: 'item' as const,
+                    key: '1-edit',
+                    title: t('deprecation.editDeprecated'),
+                    icon: DeprecatedMenuIcon,
+                    'data-testid': 'entity-menu-edit-deprecation-button',
+                    onClick: () => {
+                        setDeprecationModalInitialValues(entityData?.deprecation ?? null);
+                        setIsDeprecationModalVisible(true);
+                    },
+                });
+            } else {
+                menuItemsList.push({
+                    type: 'item' as const,
+                    key: '1',
+                    title: t('deprecation.markUnDeprecated'),
+                    icon: DeprecatedMenuIcon,
+                    'data-testid': 'entity-menu-deprecate-button',
+                    onClick: () => handleUpdateDeprecation(false),
+                });
+            }
+        });
+    }
+
+    if (onEntityProfile && menuItems.has(EntityMenuItems.LIFECYCLE_STAGE) && canEditLifecycleStage) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'lifecycleStage',
+            title: t('lifecycleStage.change'),
+            icon: FlagBanner,
+            'data-testid': 'entity-menu-lifecycle-stage-button',
+            onClick: () => setIsLifecycleStageModalVisible(true),
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.ANNOUNCE)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '1-1',
+            title: t('addNote'),
+            icon: MegaphoneSimple,
+            onClick: () => setIsEntityAnnouncementModalVisible(true),
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.ADD_TERM)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '2',
+            title: t('menuItem.addTerm'),
+            icon: Plus,
+            disabled: !canCreateGlossaryEntity,
+            tooltip: canCreateGlossaryEntity
+                ? undefined
+                : t('createGlossary.noCreatePermission', {
+                      entityName: entityRegistry.getEntityName(EntityType.GlossaryTerm),
+                  }),
+            onClick: () => setIsCreateTermModalVisible(true),
+            'data-testid': 'entity-menu-add-term-button',
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.ADD_TERM_GROUP)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '3',
+            title: t('menuItem.addTermGroup'),
+            icon: FolderPlus,
+            disabled: !canCreateGlossaryEntity,
+            tooltip: canCreateGlossaryEntity
+                ? undefined
+                : t('createGlossary.noCreatePermission', {
+                      entityName: entityRegistry.getEntityName(EntityType.GlossaryNode),
+                  }),
+            onClick: () => setIsCreateNodeModalVisible(true),
+        });
+    }
+
+    if (!isDomainMoveHidden && menuItems.has(EntityMenuItems.MOVE)) {
+        const moveDisabled = isMoveDisabled(entityType, entityData, me.platformPrivileges);
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '4',
+            title: tc('move'),
+            icon: FolderOpen,
+            disabled: moveDisabled,
+            tooltip:
+                moveDisabled && entityType === EntityType.DataProduct
+                    ? t('move.noPermission', { entityName: entityRegistry.getEntityName(entityType) })
+                    : undefined,
+            onClick: () => setIsMoveModalVisible(true),
+            'data-testid': 'entity-menu-move-button',
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.EDIT) && onEdit) {
+        const editDisabled = entityType === EntityType.DataProduct && !entityData?.privileges?.canManageEntity;
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '9',
+            title: tc('edit'),
+            icon: Pencil,
+            disabled: editDisabled,
+            tooltip: editDisabled
+                ? t('edit.noPermission', { entityName: entityRegistry.getEntityName(entityType) })
+                : undefined,
+            onClick: onEdit,
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.EDIT_GLOSSARY)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '9b',
+            title: tc('edit'),
+            icon: PencilSimple,
+            onClick: () => setIsEditGlossaryModalVisible(true),
+            'data-testid': 'entity-menu-edit-glossary-button',
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.CLONE)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '10',
+            title: t('menuItem.clone'),
+            icon: Copy,
+            disabled: !entityData?.privileges?.canManageEntity,
+            onClick: () => setIsCloneEntityModalVisible(true),
+            'data-testid': 'entity-menu-clone-button',
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.RAISE_INCIDENT)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '6',
+            title: t('menuItem.raiseIncident'),
+            icon: Warning,
+            onClick: () => setIsRaiseIncidentModalVisible(true),
+        });
+    }
+
+    if (
+        onEntityProfile &&
+        versioningEnabled &&
+        menuItems.has(EntityMenuItems.LINK_VERSION) &&
+        !entityData?.versionProperties
+    ) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'link',
+            title: t('linkVersion.title'),
+            icon: Link,
+            onClick: () => setIsLinkAssetVersionModalVisible(true),
+        });
+    }
+
+    if (onEntityProfile && entityData?.versionProperties?.isLatest) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'unlink',
+            title: t('menuItem.unlinkVersion'),
+            icon: LinkBreak,
+            onClick: () => setIsUnlinkAssetVersionModalVisible(true),
+        });
+    }
+
+    if (
+        onEntityProfile &&
+        menuItems.has(EntityMenuItems.NEW_VERSION) &&
+        canCreateTermVersion(versioningEnabled, entityData)
+    ) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'newVersion',
+            title: t('newVersion.title'),
+            icon: GitBranch,
+            'data-testid': 'entity-menu-new-version-button',
+            onClick: () => setIsNewVersionModalVisible(true),
+        });
+    }
+
+    if (onEntityProfile && entityData?.versionProperties && setDrawer) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'showVersions',
+            title: t('menuItem.showVersions'),
+            icon: GitCommit,
+            onClick: () => {
+                analytics.event({
+                    type: EventType.ShowAllVersionsEvent,
+                    assetUrn: urn,
+                    versionSetUrn: entityData?.versionProperties?.versionSet?.urn,
+                    entityType,
+                    uiLocation: 'preview',
+                });
+                setDrawer(DrawerType.VERSIONS);
+            },
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.SHARE)) {
+        const shareChildren: any[] = [];
+
+        // Copy Link
+        if (navigator.clipboard) {
+            shareChildren.push({
+                type: 'item' as const,
+                key: 'copy-link',
+                title: tc('copyLink'),
+                icon: Link,
+                onClick: () => {
+                    const { origin } = window.location;
+                    const copyUrl = `${origin}${resolveRuntimePath(entityRegistry.getEntityUrl(entityType, urn))}/`;
+                    copyToClipboard(copyUrl, ts('copyLink.success'));
+                },
+            });
+        }
+
+        // Copy URN
+        if (navigator.clipboard) {
+            shareChildren.push({
+                type: 'item' as const,
+                key: 'copy-urn',
+                title: t('menuItem.copyUrn'),
+                icon: Copy,
+                onClick: () => {
+                    copyToClipboard(urn, ts('copyUrn.success'));
+                },
+            });
+        }
+
+        // Copy Name
+        if (navigator.clipboard) {
+            const displayName = entityData ? entityRegistry.getDisplayName(entityType, entityData) : urn;
+            shareChildren.push({
+                type: 'item' as const,
+                key: 'copy-name',
+                title: t('menuItem.copyName'),
+                icon: Copy,
+                onClick: () => {
+                    const qualifiedName = entityData?.properties?.qualifiedName;
+                    copyToClipboard(qualifiedName || displayName, ts('copyName.success'));
+                },
+            });
+        }
+
+        // Email
+        shareChildren.push({
+            type: 'item' as const,
+            key: 'email',
+            title: t('menuItem.email'),
+            icon: Envelope,
+            onClick: () => {
+                const displayName = entityData ? entityRegistry.getDisplayName(entityType, entityData) : urn;
+                const displayType =
+                    getFirstSubType(entityData) || entityRegistry.getEntityName(entityType) || entityType;
+                const linkText = window.location.href;
+                const link = qs.stringifyUrl({
+                    url: 'mailto:',
+                    query: {
+                        subject: t('share.emailSubject', { displayName, displayType }),
+                        body: t('share.emailBody', { displayType, linkText, urn }),
+                    },
+                });
+                window.open(link, '_blank', 'noopener,noreferrer');
+            },
+        });
+
+        menuItemsList.push({
+            type: 'item' as const,
+            key: '8',
+            title: tc('share'),
+            icon: Share,
+            children: shareChildren,
+        });
+    }
+
+    if (menuItems.has(EntityMenuItems.CHANGE_HISTORY)) {
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'change-history',
+            title: t('menuItem.changeHistory'),
+            icon: ClockCounterClockwise,
+            onClick: () => setIsChangeHistoryOpen(true),
+        });
+    }
+
+    // Delete should always be last (destructive action)
+    if (menuItems.has(EntityMenuItems.DELETE)) {
+        let deleteTooltip: string | undefined;
+        const deleteDisabled = isDeleteDisabled(entityType, entityData, me.platformPrivileges);
+        const entityName = entityRegistry.getEntityName(entityType);
+        if (shouldDisplayChildDeletionWarning(entityType, entityData, me.platformPrivileges)) {
+            deleteTooltip = isDomainEntity
+                ? t('delete.cantDeleteSubDomain', { entityName })
+                : t('delete.cantDeleteChild', { entityName });
+        } else if (deleteDisabled) {
+            deleteTooltip = t('delete.noPermission', { entityName });
+        }
+        menuItemsList.push({
+            type: 'item' as const,
+            key: 'delete',
+            title: isGlossaryTermVersion(entityType, entityData) ? t('delete.versionTitle') : tc('delete'),
+            icon: Trash,
+            danger: true,
+            disabled: deleteDisabled,
+            tooltip: deleteTooltip,
+            onClick: onDeleteEntity,
+            'data-testid': 'entity-menu-delete-button',
+        });
+    }
+
+    return (
+        <>
+            <Menu items={menuItemsList} trigger={triggerType} overlayStyle={{ minWidth: 150 }}>
+                <DotsThreeVertical data-testid="MoreVertOutlinedIcon" size={20} weight="bold" />
+            </Menu>
+            {isCreateTermModalVisible && (
+                <CreateGlossaryEntityModal
+                    entityType={EntityType.GlossaryTerm}
+                    canCreateGlossaryEntity={canCreateGlossaryEntity}
+                    onClose={() => setIsCreateTermModalVisible(false)}
+                    refetchData={refetchForTerms}
+                />
+            )}
+            {isCreateNodeModalVisible && (
+                <CreateGlossaryEntityModal
+                    entityType={EntityType.GlossaryNode}
+                    canCreateGlossaryEntity={canCreateGlossaryEntity}
+                    onClose={() => setIsCreateNodeModalVisible(false)}
+                    refetchData={refetchForNodes}
+                />
+            )}
+            {isCloneEntityModalVisible && (
+                <CreateGlossaryEntityModal
+                    entityType={entityType}
+                    canCreateGlossaryEntity
+                    onClose={() => setIsCloneEntityModalVisible(false)}
+                    refetchData={entityType === EntityType.GlossaryTerm ? refetchForTerms : refetchForNodes}
+                    isCloning
+                />
+            )}
+            {isEditGlossaryModalVisible && isGlossaryEntity && (
+                <EditGlossaryEntityModal
+                    urn={urn}
+                    entityType={entityType}
+                    entityData={entityData}
+                    onClose={() => setIsEditGlossaryModalVisible(false)}
+                    refetchData={refetchForEntity}
+                />
+            )}
+            {onEntityProfile && isLifecycleStageModalVisible && canEditLifecycleStage && (
+                <LifecycleStageModal
+                    urn={urn}
+                    entityType={entityType}
+                    currentStage={entityData?.status?.lifecycleStage}
+                    onClose={() => setIsLifecycleStageModalVisible(false)}
+                    onSuccess={() => refetchForEntity?.()}
+                />
+            )}
+            {isNewVersionModalVisible && onEntityProfile && (
+                <CreateGlossaryTermVersionModal
+                    termUrn={urn}
+                    currentName={entityData?.properties?.name ?? entityData?.name ?? ''}
+                    currentDefinition={entityData?.properties?.description}
+                    currentVersionLabel={entityData?.versionProperties?.version?.versionTag}
+                    onClose={() => setIsNewVersionModalVisible(false)}
+                />
+            )}
+            {isDeprecationModalVisible && (
+                <UpdateDeprecationModal
+                    urns={[urn]}
+                    initialDeprecation={deprecationModalInitialValues}
+                    onClose={() => {
+                        setIsDeprecationModalVisible(false);
+                        setDeprecationModalInitialValues(null);
+                    }}
+                    refetch={(formData) => {
+                        refetchForEntity?.();
+                        if (entityType === EntityType.Domain) {
+                            handleDeprecateDomainComplete(true, formData);
+                        } else {
+                            // For non-domain entities (e.g. data products), let the preview
+                            // optimistically update its local deprecation copy so the badge
+                            // shows up immediately without waiting on a search refetch.
+                            refetchDeprecation?.(formData);
+                        }
+                    }}
+                />
+            )}
+            {isEntityAnnouncementModalVisible && (
+                <CreateEntityAnnouncementModal
+                    urn={urn}
+                    onClose={() => setIsEntityAnnouncementModalVisible(false)}
+                    onCreate={() => setTimeout(() => refetchForEntity?.(), 2000)}
+                />
+            )}
+            {isMoveModalVisible && (
+                <MoveEntityModal
+                    entityType={entityType}
+                    entityData={entityData}
+                    urn={urn}
+                    onClose={() => setIsMoveModalVisible(false)}
+                />
+            )}
+            {DeleteConfirmationModal}
+            {hasBeenDeleted && !onDelete && deleteRedirectPath && <Redirect to={deleteRedirectPath} />}
+            {isRaiseIncidentModalVisible && (
+                <IncidentDetailDrawer
+                    entity={{
+                        urn,
+                        entityType,
+                        platform: entityData?.platform ?? entityData?.dataPlatformInstance?.platform,
+                    }}
+                    mode={IncidentAction.CREATE}
+                    onSubmit={() => {
+                        setIsRaiseIncidentModalVisible(false);
+                        setTimeout(() => {
+                            refetchForEntity?.();
+                            history.push(
+                                `${getEntityPath(
+                                    entityType,
+                                    urn,
+                                    entityRegistry,
+                                    false,
+                                    isHideSiblingMode,
+                                    EntityTabPath.INCIDENTS,
+                                )}`,
+                            );
+                        }, 3000);
+                    }}
+                    onCancel={() => setIsRaiseIncidentModalVisible(false)}
+                />
+            )}
+            {isLinkAssetVersionModalVisible && (
+                <LinkAssetVersionModal
+                    urn={urn}
+                    entityType={entityType}
+                    closeModal={() => setIsLinkAssetVersionModalVisible(false)}
+                    refetch={refetchForEntity}
+                />
+            )}
+            {isUnlinkAssetVersionModalVisible && (
+                <UnlinkAssetVersionModal
+                    urn={urn}
+                    entityType={entityType}
+                    versionSetUrn={entityData?.versionProperties?.versionSet?.urn}
+                    closeModal={() => setIsUnlinkAssetVersionModalVisible(false)}
+                    refetch={refetchForEntity}
+                />
+            )}
+            {isChangeHistoryOpen && (
+                <HistorySidebar
+                    open
+                    onClose={() => setIsChangeHistoryOpen(false)}
+                    urn={urn}
+                    versionList={[]}
+                    hideSemanticVersions
+                    entityType={entityType}
+                    versionSetUrn={entityData?.versionProperties?.versionSet?.urn}
+                    currentVersionUrn={entityData?.versionProperties?.versionSet?.urn ? urn : undefined}
+                />
+            )}
+        </>
+    );
+};
+
+export default EntityDropdown;

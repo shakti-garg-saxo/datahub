@@ -1,9 +1,11 @@
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     DefaultDict,
     Dict,
     Iterable,
@@ -18,30 +20,27 @@ from typing import (
 )
 
 from datahub.emitter import mce_builder
+from datahub.emitter.mcp import MetadataChangeProposalWrapper
+from datahub.ingestion.api.source_helpers import auto_workunit
 from datahub.ingestion.api.workunit import MetadataWorkUnit
-from datahub.ingestion.source.aws.aws_common import make_s3_urn
+from datahub.ingestion.source.aws.s3_util import make_s3_urn
 from datahub.ingestion.source.aws.sagemaker_processors.common import (
     SagemakerSourceReport,
 )
 from datahub.ingestion.source.aws.sagemaker_processors.job_classes import (
     AutoMlJobInfo,
     CompilationJobInfo,
-    EdgePackagingJobInfo,
     HyperParameterTuningJobInfo,
     LabelingJobInfo,
     ProcessingJobInfo,
     TrainingJobInfo,
     TransformJobInfo,
 )
-from datahub.metadata.com.linkedin.pegasus2avro.metadata.snapshot import DatasetSnapshot
-from datahub.metadata.com.linkedin.pegasus2avro.mxe import MetadataChangeEvent
 from datahub.metadata.schema_classes import (
     BrowsePathsClass,
     DataFlowInfoClass,
-    DataFlowSnapshotClass,
     DataJobInfoClass,
     DataJobInputOutputClass,
-    DataJobSnapshotClass,
     DatasetPropertiesClass,
     JobStatusClass,
 )
@@ -49,11 +48,12 @@ from datahub.metadata.schema_classes import (
 if TYPE_CHECKING:
     from mypy_boto3_sagemaker import SageMakerClient
 
+logger = logging.getLogger(__name__)
+
 JobInfo = TypeVar(
     "JobInfo",
     AutoMlJobInfo,
     CompilationJobInfo,
-    EdgePackagingJobInfo,
     HyperParameterTuningJobInfo,
     LabelingJobInfo,
     ProcessingJobInfo,
@@ -65,7 +65,6 @@ JobInfo = TypeVar(
 class JobType(Enum):
     AUTO_ML = "auto_ml"
     COMPILATION = "compilation"
-    EDGE_PACKAGING = "edge_packaging"
     HYPER_PARAMETER_TUNING = "hyper_parameter_tuning"
     LABELING = "labeling"
     PROCESSING = "processing"
@@ -78,7 +77,6 @@ job_types = sorted([x for x in JobType], key=lambda x: x.value)
 job_type_to_info: Mapping[JobType, Any] = {
     JobType.AUTO_ML: AutoMlJobInfo(),
     JobType.COMPILATION: CompilationJobInfo(),
-    JobType.EDGE_PACKAGING: EdgePackagingJobInfo(),
     JobType.HYPER_PARAMETER_TUNING: HyperParameterTuningJobInfo(),
     JobType.LABELING: LabelingJobInfo(),
     JobType.PROCESSING: ProcessingJobInfo(),
@@ -88,14 +86,12 @@ job_type_to_info: Mapping[JobType, Any] = {
 
 
 def make_sagemaker_flow_urn(job_type: str, job_name: str, env: str) -> str:
-
     return mce_builder.make_data_flow_urn(
         orchestrator="sagemaker", flow_id=f"{job_type}:{job_name}", cluster=env
     )
 
 
 def make_sagemaker_job_urn(job_type: str, job_name: str, arn: str, env: str) -> str:
-
     flow_urn = make_sagemaker_flow_urn(job_type, job_name, env)
 
     # SageMaker has no global grouping property for jobs,
@@ -111,7 +107,10 @@ class SageMakerJob:
     Produced by first-pass ingestion and basis for subsequent extraction.
     """
 
-    job_snapshot: DataJobSnapshotClass
+    job_urn: str
+    # Built in the first pass. DataJobInputOutput needs the second pass's results, so the
+    # third pass builds it and emits it right after these.
+    job_aspects: List[Union[DataJobInfoClass, BrowsePathsClass]]
     job_name: str
     job_arn: str
     job_type: JobType
@@ -153,7 +152,7 @@ class JobProcessor:
     """
 
     # boto3 SageMaker client
-    sagemaker_client: "SageMakerClient"
+    sagemaker_client: Callable[[], "SageMakerClient"]
     env: str
     report: SagemakerSourceReport
     # config filter for specific job types to ingest (see metadata-ingestion README)
@@ -175,10 +174,8 @@ class JobProcessor:
     )
 
     def get_jobs(self, job_type: JobType, job_spec: JobInfo) -> List[Any]:
-
         jobs = []
-
-        paginator = self.sagemaker_client.get_paginator(job_spec.list_command)
+        paginator = self.sagemaker_client().get_paginator(job_spec.list_command)
         for page in paginator.paginate():
             page_jobs: List[Any] = page[job_spec.list_key]
 
@@ -202,15 +199,16 @@ class JobProcessor:
         self,
         model_data_url: str,
         job_key: JobKey,
-        metrics: Dict[str, Any] = {},
-        hyperparameters: Dict[str, Any] = {},
+        metrics: Optional[Dict[str, Any]] = None,
+        hyperparameters: Optional[Dict[str, Any]] = None,
     ) -> None:
+        metrics = metrics or {}
+        hyperparameters = hyperparameters or {}
 
         model_jobs = self.model_image_to_jobs[model_data_url]
 
         # if model doesn't have job yet, init
         if job_key in model_jobs:
-
             model_jobs[job_key].update(hyperparameters, metrics)
 
         else:
@@ -220,15 +218,16 @@ class JobProcessor:
         self,
         model_name: str,
         job_key: JobKey,
-        metrics: Dict[str, Any] = {},
-        hyperparameters: Dict[str, Any] = {},
+        metrics: Optional[Dict[str, Any]] = None,
+        hyperparameters: Optional[Dict[str, Any]] = None,
     ) -> None:
+        metrics = metrics or {}
+        hyperparameters = hyperparameters or {}
 
         model_jobs = self.model_name_to_jobs[model_name]
 
         # if model doesn't have job yet, init
         if job_key in model_jobs:
-
             model_jobs[job_key].update(hyperparameters, metrics)
 
         else:
@@ -258,7 +257,6 @@ class JobProcessor:
 
         # iterate through keys in sorted order for consistency
         for job_type in allowed_jobs:
-
             job_spec = job_type_to_info[job_type]
 
             job_type_jobs = self.get_jobs(job_type, job_spec)
@@ -275,32 +273,36 @@ class JobProcessor:
         describe_command = job_type_to_info[job_type].describe_command
         describe_name_key = job_type_to_info[job_type].describe_name_key
 
-        return getattr(self.sagemaker_client, describe_command)(
+        return getattr(self.sagemaker_client(), describe_command)(
             **{describe_name_key: job_name}
         )
 
     def get_workunits(self) -> Iterable[MetadataWorkUnit]:
-
+        logger.info("Getting all SageMaker jobs")
         jobs = self.get_all_jobs()
 
         processed_jobs: Dict[str, SageMakerJob] = {}
 
+        logger.info("Processing SageMaker jobs")
         # first pass: process jobs and collect datasets used
+        logger.info("first pass: process jobs and collect datasets used")
         for job in jobs:
-
             job_type = job_type_to_info[job["type"]]
             job_name = job[job_type.list_name_key]
-
+            logger.debug(f"Processing job {job_name} with type {job_type}")
             job_details = self.get_job_details(job_name, job["type"])
 
             processed_job = getattr(self, job_type.processor)(job_details)
-            processed_jobs[processed_job.job_snapshot.urn] = processed_job
+            processed_jobs[processed_job.job_urn] = processed_job
 
         all_datasets = {}
 
         # second pass:
         #   - move output jobs to inputs
         #   - aggregate i/o datasets
+        logger.info(
+            "second pass: move output jobs to inputs and aggregate i/o datasets"
+        )
         for job_urn in sorted(processed_jobs):
             processed_job = processed_jobs[job_urn]
 
@@ -309,82 +311,53 @@ class JobProcessor:
 
             all_datasets.update(processed_job.input_datasets)
             all_datasets.update(processed_job.output_datasets)
+            self.report.report_job_processed()
 
         # yield datasets
         for dataset_urn, dataset in all_datasets.items():
-
-            dataset_snapshot = DatasetSnapshot(
-                urn=dataset_urn,
-                aspects=[],
-            )
-            dataset_snapshot.aspects.append(
-                DatasetPropertiesClass(
+            yield MetadataChangeProposalWrapper(
+                entityUrn=dataset_urn,
+                aspect=DatasetPropertiesClass(
                     customProperties={k: str(v) for k, v in dataset.items()},
                     tags=[],
-                )
-            )
-            dataset_mce = MetadataChangeEvent(proposedSnapshot=dataset_snapshot)
-            dataset_wu = MetadataWorkUnit(
-                id=dataset_urn,
-                mce=dataset_mce,
-            )
+                ),
+            ).as_workunit()
             self.report.report_dataset_scanned()
-            self.report.report_workunit(dataset_wu)
-            yield dataset_wu
 
-        # third pass: construct and yield MCEs
+        # third pass: yield each job's flow, then all of the job's aspects back to back,
+        # so AutoBrowsePathV2Processor sees the job as one batch
+        logger.info("third pass: yield flows and jobs")
         for job_urn in sorted(processed_jobs):
-
             processed_job = processed_jobs[job_urn]
-            job_snapshot = processed_job.job_snapshot
 
-            flow_urn = make_sagemaker_flow_urn(
-                processed_job.job_type.value, processed_job.job_name, self.env
+            yield MetadataChangeProposalWrapper(
+                entityUrn=make_sagemaker_flow_urn(
+                    processed_job.job_type.value, processed_job.job_name, self.env
+                ),
+                aspect=DataFlowInfoClass(name=processed_job.job_name),
+            ).as_workunit()
+
+            job_input_output = DataJobInputOutputClass(
+                inputDatasets=sorted(list(processed_job.input_datasets.keys())),
+                outputDatasets=sorted(list(processed_job.output_datasets.keys())),
+                inputDatajobs=sorted(list(processed_job.input_jobs)),
             )
-
-            # create flow for each job
-            flow_mce = MetadataChangeEvent(
-                proposedSnapshot=DataFlowSnapshotClass(
-                    urn=flow_urn,
-                    aspects=[
-                        DataFlowInfoClass(
-                            name=processed_job.job_name,
-                        ),
-                    ],
+            yield from auto_workunit(
+                MetadataChangeProposalWrapper.construct_many(
+                    entityUrn=job_urn,
+                    aspects=[*processed_job.job_aspects, job_input_output],
                 )
-            )
-            flow_wu = MetadataWorkUnit(
-                id=flow_urn,
-                mce=flow_mce,
-            )
-            self.report.report_workunit(flow_wu)
-            yield flow_wu
-
-            job_snapshot.aspects.append(
-                DataJobInputOutputClass(
-                    inputDatasets=sorted(list(processed_job.input_datasets.keys())),
-                    outputDatasets=sorted(list(processed_job.output_datasets.keys())),
-                    inputDatajobs=sorted(list(processed_job.input_jobs)),
-                )
-            )
-
-            job_mce = MetadataChangeEvent(proposedSnapshot=job_snapshot)
-            job_wu = MetadataWorkUnit(
-                id=job_urn,
-                mce=job_mce,
             )
             self.report.report_job_scanned()
-            self.report.report_workunit(job_wu)
-            yield job_wu
 
-    def create_common_job_snapshot(
+    def _create_common_job_aspects(
         self,
         job: Dict[str, Any],
         job_type: JobType,
         job_url: Optional[str] = None,
-    ) -> Tuple[DataJobSnapshotClass, str, str]:
+    ) -> Tuple[str, List[Union[DataJobInfoClass, BrowsePathsClass]], str, str]:
         """
-        General function for generating a job snapshot.
+        Returns (job URN, [DataJobInfo, BrowsePaths], job name, job ARN).
         """
 
         job_type_info = job_type_to_info[job_type]
@@ -399,52 +372,47 @@ class JobProcessor:
         if mapped_status is None:
             mapped_status = JobStatusClass.UNKNOWN
 
-            self.report.report_warning(
-                name,
-                f"Unknown status for {name} ({arn}): {sagemaker_status}",
+            self.report.warning(
+                message="Unknown SageMaker job status",
+                context=f"{name} ({arn}): {sagemaker_status}",
+                log=False,
             )
 
         job_urn = make_sagemaker_job_urn(job_type.value, name, arn, self.env)
-        job_snapshot = DataJobSnapshotClass(
-            urn=job_urn,
-            aspects=[
-                DataJobInfoClass(
-                    name=name,
-                    type="SAGEMAKER",
-                    status=mapped_status,
-                    externalUrl=job_url,
-                    customProperties={
-                        **{key: str(value) for key, value in job.items()},
-                        "jobType": job_type.value,
-                    },
-                ),
-                BrowsePathsClass(paths=[f"/{job_type.value}/{name}"]),
-            ],
-        )
+        job_aspects: List[Union[DataJobInfoClass, BrowsePathsClass]] = [
+            DataJobInfoClass(
+                name=name,
+                type="SAGEMAKER",
+                status=mapped_status,
+                externalUrl=job_url,
+                customProperties={
+                    **{key: str(value) for key, value in job.items()},
+                    "jobType": job_type.value,
+                },
+            ),
+            BrowsePathsClass(paths=[f"/{job_type.value}"]),
+        ]
 
-        return job_snapshot, name, arn
+        return job_urn, job_aspects, name, arn
 
     def process_auto_ml_job(self, job: Dict[str, Any]) -> SageMakerJob:
         """
         Process outputs from Boto3 describe_auto_ml_job()
 
-        See https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sagemaker.html#SageMaker.Client.describe_auto_ml_job
+        See https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sagemaker/client/describe_auto_ml_job_v2.html
         """
 
         JOB_TYPE = JobType.AUTO_ML
 
         input_datasets = {}
-
-        for input_config in job.get("InputDataConfig", []):
+        for input_config in job.get("AutoMLJobInputDataConfig", []):
             input_data = input_config.get("DataSource", {}).get("S3DataSource")
-
             if input_data is not None and "S3Uri" in input_data:
                 input_datasets[make_s3_urn(input_data["S3Uri"], self.env)] = {
                     "dataset_type": "s3",
                     "uri": input_data["S3Uri"],
                     "datatype": input_data.get("S3DataType"),
                 }
-
         output_datasets = {}
 
         output_s3_path = job.get("OutputDataConfig", {}).get("S3OutputPath")
@@ -455,34 +423,44 @@ class JobProcessor:
                 "uri": output_s3_path,
             }
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
         )
 
+        metrics: Dict[str, Any] = {}
+        # Get job metrics from CandidateMetrics
+        candidate_metrics = (
+            job.get("BestCandidate", {})
+            .get("CandidateProperties", {})
+            .get("CandidateMetrics", [])
+        )
+        if candidate_metrics:
+            metrics = {
+                metric["MetricName"]: metric["Value"] for metric in candidate_metrics
+            }
+
         model_containers = job.get("BestCandidate", {}).get("InferenceContainers", [])
 
         for model_container in model_containers:
-
             model_data_url = model_container.get("ModelDataUrl")
 
             if model_data_url is not None:
+                job_key = JobKey(job_urn, JobDirection.TRAINING)
 
-                job_key = JobKey(job_snapshot.urn, JobDirection.TRAINING)
-
-                self.update_model_image_jobs(model_data_url, job_key)
+                self.update_model_image_jobs(model_data_url, job_key, metrics=metrics)
 
         return SageMakerJob(
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             input_datasets=input_datasets,
             output_datasets=output_datasets,
         )
 
     def process_compilation_job(self, job: Dict[str, Any]) -> SageMakerJob:
-
         """
         Process outputs from Boto3 describe_compilation_job()
 
@@ -515,7 +493,7 @@ class JobProcessor:
                 "target_platform": output_data.get("TargetPlatform"),
             }
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
             f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/compilation-jobs/{job['CompilationJobName']}",
@@ -525,98 +503,16 @@ class JobProcessor:
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             input_datasets=input_datasets,
             output_datasets=output_datasets,
-        )
-
-    def process_edge_packaging_job(
-        self,
-        job: Dict[str, Any],
-    ) -> SageMakerJob:
-
-        """
-        Process outputs from Boto3 describe_edge_packaging_job()
-
-        See https://boto3.amazonaws.com/v1/documentation/api/latest/reference/services/sagemaker.html#SageMaker.Client.describe_edge_packaging_job
-        """
-
-        JOB_TYPE = JobType.EDGE_PACKAGING
-
-        name: str = job["EdgePackagingJobName"]
-        arn: str = job["EdgePackagingJobArn"]
-
-        output_datasets = {}
-
-        model_artifact_s3_uri: Optional[str] = job.get("ModelArtifact")
-        output_s3_uri: Optional[str] = job.get("OutputConfig", {}).get(
-            "S3OutputLocation"
-        )
-
-        if model_artifact_s3_uri is not None:
-            output_datasets[make_s3_urn(model_artifact_s3_uri, self.env)] = {
-                "dataset_type": "s3",
-                "uri": model_artifact_s3_uri,
-            }
-
-        if output_s3_uri is not None:
-            output_datasets[make_s3_urn(output_s3_uri, self.env)] = {
-                "dataset_type": "s3",
-                "uri": output_s3_uri,
-            }
-
-        # from docs: "The name of the SageMaker Neo compilation job that is used to locate model artifacts that are being packaged."
-        compilation_job_name: Optional[str] = job.get("CompilationJobName")
-
-        output_jobs = set()
-        if compilation_job_name is not None:
-
-            # globally unique job name
-            full_job_name = ("compilation", compilation_job_name)
-
-            if full_job_name in self.name_to_arn:
-
-                output_jobs.add(
-                    make_sagemaker_job_urn(
-                        "compilation",
-                        compilation_job_name,
-                        self.name_to_arn[full_job_name],
-                        self.env,
-                    )
-                )
-            else:
-
-                self.report.report_warning(
-                    name,
-                    f"Unable to find ARN for compilation job {compilation_job_name} produced by edge packaging job {arn}",
-                )
-
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
-            job,
-            JOB_TYPE,
-            f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/edge-packaging-jobs/{job['EdgePackagingJobName']}",
-        )
-
-        if job.get("ModelName") is not None:
-
-            job_key = JobKey(job_snapshot.urn, JobDirection.DOWNSTREAM)
-
-            self.update_model_name_jobs(job["ModelName"], job_key)
-
-        return SageMakerJob(
-            job_name=job_name,
-            job_arn=job_arn,
-            job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
-            output_datasets=output_datasets,
-            output_jobs=output_jobs,
         )
 
     def process_hyper_parameter_tuning_job(
         self,
         job: Dict[str, Any],
     ) -> SageMakerJob:
-
         """
         Process outputs from Boto3 describe_hyper_parameter_tuning_job()
 
@@ -631,11 +527,9 @@ class JobProcessor:
         training_jobs = set()
 
         for training_job in job.get("TrainingJobDefinitions", []):
-
             full_job_name = ("training", training_job["DefinitionName"])
 
             if full_job_name in self.name_to_arn:
-
                 training_jobs.add(
                     make_sagemaker_job_urn(
                         "training",
@@ -645,13 +539,13 @@ class JobProcessor:
                     )
                 )
             else:
-
-                self.report.report_warning(
-                    name,
-                    f"Unable to find ARN for training job {training_job['DefinitionName']} produced by hyperparameter tuning job {arn}",
+                self.report.warning(
+                    message="Unable to find ARN for training job produced by hyperparameter tuning job",
+                    context=f"{name}: training_job={training_job['DefinitionName']}, tuning_job={arn}",
+                    log=False,
                 )
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
             f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/hyper-tuning-jobs/{job['HyperParameterTuningJobName']}",
@@ -661,12 +555,12 @@ class JobProcessor:
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             output_jobs=training_jobs,
         )
 
     def process_labeling_job(self, job: Dict[str, Any]) -> SageMakerJob:
-
         """
         Process outputs from Boto3 describe_labeling_job()
 
@@ -714,7 +608,7 @@ class JobProcessor:
                 "uri": output_config_s3_uri,
             }
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
             f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/labeling-jobs/{job['LabelingJobName']}",
@@ -724,13 +618,13 @@ class JobProcessor:
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             input_datasets=input_datasets,
             output_datasets=output_datasets,
         )
 
     def process_processing_job(self, job: Dict[str, Any]) -> SageMakerJob:
-
         """
         Process outputs from Boto3 describe_processing_job()
 
@@ -767,17 +661,15 @@ class JobProcessor:
 
         input_datasets = {}
 
-        inputs = job["ProcessingInputs"]
+        inputs = job.get("ProcessingInputs", [])
 
         for input_config in inputs:
-
             input_name = input_config["InputName"]
 
             input_s3 = input_config.get("S3Input", {})
             input_s3_uri = input_s3.get("S3Uri")
 
             if input_s3_uri is not None:
-
                 input_datasets[make_s3_urn(input_s3_uri, self.env)] = {
                     "dataset_type": "s3",
                     "uri": input_s3_uri,
@@ -829,7 +721,7 @@ class JobProcessor:
                     "dataset_type": "sagemaker_feature_group",
                 }
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
             f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/processing-jobs/{job['ProcessingJobName']}",
@@ -839,13 +731,13 @@ class JobProcessor:
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             input_datasets=input_datasets,
             input_jobs=input_jobs,
         )
 
     def process_training_job(self, job: Dict[str, Any]) -> SageMakerJob:
-
         """
         Process outputs from Boto3 describe_training_job()
 
@@ -859,7 +751,6 @@ class JobProcessor:
         input_data_configs = job.get("InputDataConfig", [])
 
         for config in input_data_configs:
-
             data_source = config.get("DataSource", {})
 
             s3_source = data_source.get("S3DataSource", {})
@@ -875,7 +766,7 @@ class JobProcessor:
                     "channel_name": config.get("ChannelName"),
                 }
 
-        output_s3_uri = job.get("OutputDataConfig", {}).get("S3OutputPath")
+        output_data_s3_uri = job.get("OutputDataConfig", {}).get("S3OutputPath")
         checkpoint_s3_uri = job.get("CheckpointConfig", {}).get("S3Uri")
         debug_s3_path = job.get("DebugHookConfig", {}).get("S3OutputPath")
         tensorboard_output_path = job.get("TensorBoardOutputConfig", {}).get(
@@ -896,7 +787,7 @@ class JobProcessor:
 
         # process all output datasets at once
         for output_s3_uri in [
-            output_s3_uri,
+            output_data_s3_uri,
             checkpoint_s3_uri,
             debug_s3_path,
             tensorboard_output_path,
@@ -904,14 +795,13 @@ class JobProcessor:
             *processed_debug_configs,
             *processed_profiler_configs,
         ]:
-
             if output_s3_uri is not None:
                 output_datasets[make_s3_urn(output_s3_uri, self.env)] = {
                     "dataset_type": "s3",
                     "uri": output_s3_uri,
                 }
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
             f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/jobs/{job['TrainingJobName']}",
@@ -936,12 +826,12 @@ class JobProcessor:
             zip(
                 [metric["MetricName"] for metric in latest_metrics],
                 [metric["Value"] for metric in latest_metrics],
+                strict=False,
             )
         )
 
         if model_data_url is not None:
-
-            job_key = JobKey(job_snapshot.urn, JobDirection.TRAINING)
+            job_key = JobKey(job_urn, JobDirection.TRAINING)
 
             self.update_model_image_jobs(
                 model_data_url,
@@ -954,13 +844,13 @@ class JobProcessor:
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             input_datasets=input_datasets,
             output_datasets=output_datasets,
         )
 
     def process_transform_job(self, job: Dict[str, Any]) -> SageMakerJob:
-
         """
         Process outputs from Boto3 describe_transform_job()
 
@@ -977,7 +867,6 @@ class JobProcessor:
         input_datasets = {}
 
         if input_s3_uri is not None:
-
             input_datasets[make_s3_urn(input_s3_uri, self.env)] = {
                 "dataset_type": "s3",
                 "uri": input_s3_uri,
@@ -1023,14 +912,14 @@ class JobProcessor:
                     )
                 )
 
-        job_snapshot, job_name, job_arn = self.create_common_job_snapshot(
+        job_urn, job_aspects, job_name, job_arn = self._create_common_job_aspects(
             job,
             JOB_TYPE,
             f"https://{self.aws_region}.console.aws.amazon.com/sagemaker/home?region={self.aws_region}#/transform-jobs/{job['TransformJobName']}",
         )
 
         if job.get("ModelName") is not None:
-            job_key = JobKey(job_snapshot.urn, JobDirection.DOWNSTREAM)
+            job_key = JobKey(job_urn, JobDirection.DOWNSTREAM)
 
             self.update_model_name_jobs(
                 job["ModelName"],
@@ -1041,7 +930,8 @@ class JobProcessor:
             job_name=job_name,
             job_arn=job_arn,
             job_type=JOB_TYPE,
-            job_snapshot=job_snapshot,
+            job_urn=job_urn,
+            job_aspects=job_aspects,
             input_datasets=input_datasets,
             output_datasets=output_datasets,
             input_jobs=input_jobs,

@@ -1,131 +1,123 @@
 package com.linkedin.metadata.graph.elastic;
 
-import com.codahale.metrics.Timer;
-import com.linkedin.metadata.query.Condition;
-import com.linkedin.metadata.query.CriterionArray;
-import com.linkedin.metadata.query.Filter;
-import com.linkedin.metadata.query.RelationshipDirection;
-import com.linkedin.metadata.query.RelationshipFilter;
-import com.linkedin.metadata.utils.elasticsearch.IndexConvention;
+import com.linkedin.common.urn.Urn;
+import com.linkedin.metadata.config.graph.GraphServiceConfiguration;
+import com.linkedin.metadata.config.search.ElasticSearchConfiguration;
+import com.linkedin.metadata.graph.GraphFilters;
+import com.linkedin.metadata.graph.LineageCountResult;
+import com.linkedin.metadata.graph.LineageGraphFilters;
+import com.linkedin.metadata.query.filter.SortCriterion;
+import com.linkedin.metadata.utils.elasticsearch.SearchClientShim;
 import com.linkedin.metadata.utils.metrics.MetricUtils;
-import java.io.IOException;
+import io.datahubproject.metadata.context.OperationContext;
 import java.util.List;
+import java.util.Set;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
-import lombok.RequiredArgsConstructor;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
-import org.elasticsearch.action.search.SearchRequest;
-import org.elasticsearch.action.search.SearchResponse;
-import org.elasticsearch.client.RequestOptions;
-import org.elasticsearch.client.RestHighLevelClient;
-import org.elasticsearch.index.query.BoolQueryBuilder;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.search.builder.SearchSourceBuilder;
+import org.apache.commons.lang3.NotImplementedException;
+import org.opensearch.action.search.SearchRequest;
+import org.opensearch.action.search.SearchResponse;
+import org.springframework.beans.factory.DisposableBean;
 
-import static com.linkedin.metadata.graph.elastic.ElasticSearchGraphService.INDEX_NAME;
-
-
-/**
- * A search DAO for Elasticsearch backend.
- */
+/** A search DAO for Elasticsearch backend. */
 @Slf4j
-@RequiredArgsConstructor
-public class ESGraphQueryDAO {
+public class ESGraphQueryDAO implements GraphQueryDAO, DisposableBean {
 
-  private final RestHighLevelClient client;
-  private final IndexConvention indexConvention;
+  private final GraphQueryBaseDAO delegate;
+  @Getter private final GraphServiceConfiguration graphServiceConfig;
+  private final ElasticSearchConfiguration config;
 
-  /**
-   *
-   * @param criterionArray CriterionArray in a Filter
-   */
-  @Nonnull
-  public static void addCriterionToQueryBuilder(@Nonnull CriterionArray criterionArray, String node, BoolQueryBuilder finalQuery) {
-    if (!criterionArray.stream().allMatch(criterion -> Condition.EQUAL.equals(criterion.getCondition()))) {
-      throw new RuntimeException("Currently Elastic query filter only supports EQUAL condition " + criterionArray);
+  public ESGraphQueryDAO(
+      SearchClientShim<?> client,
+      GraphServiceConfiguration graphServiceConfig,
+      ElasticSearchConfiguration config,
+      MetricUtils metricUtils) {
+
+    this.graphServiceConfig = graphServiceConfig;
+    this.config = config;
+
+    switch (client.getEngineType()) {
+      case ELASTICSEARCH_8:
+      case OPENSEARCH_2:
+      case OPENSEARCH_3:
+      case ELASTICSEARCH_9:
+        this.delegate = new GraphQueryPITDAO(client, graphServiceConfig, config, metricUtils);
+        break;
+      default:
+        throw new NotImplementedException("Unsupported Elasticsearch implementation");
     }
-
-    criterionArray.forEach(
-        criterion -> finalQuery.must(
-            QueryBuilders.termQuery(node + "." + criterion.getField(), criterion.getValue())
-        )
-    );
   }
 
+  public ElasticSearchConfiguration getESSearchConfig() {
+    return config;
+  }
+
+  @Override
+  public LineageResponse getLineage(
+      @Nonnull OperationContext opContext,
+      @Nonnull Urn entityUrn,
+      LineageGraphFilters lineageGraphFilters,
+      int offset,
+      @Nullable Integer count,
+      int maxHops) {
+    return delegate.getLineage(opContext, entityUrn, lineageGraphFilters, offset, count, maxHops);
+  }
+
+  @Override
+  public LineageCountResult getLineageCount(
+      @Nonnull OperationContext opContext,
+      @Nonnull Set<Urn> entityUrns,
+      @Nonnull LineageGraphFilters lineageGraphFilters,
+      int sampleSize) {
+    return delegate.getLineageCount(opContext, entityUrns, lineageGraphFilters, sampleSize);
+  }
+
+  @Override
+  public LineageResponse getImpactLineage(
+      @Nonnull OperationContext opContext,
+      @Nonnull Urn entityUrn,
+      @Nonnull LineageGraphFilters filters,
+      int maxHops) {
+    return delegate.getImpactLineage(opContext, entityUrn, filters, maxHops);
+  }
+
+  @Override
   public SearchResponse getSearchResponse(
-      @Nullable final String sourceType,
-      @Nonnull  final Filter sourceEntityFilter,
-      @Nullable final String destinationType,
-      @Nonnull final Filter destinationEntityFilter,
-      @Nonnull final List<String> relationshipTypes,
-      @Nonnull final RelationshipFilter relationshipFilter,
-      final int offset,
-      final int count) {
-    SearchRequest searchRequest = new SearchRequest();
-
-    SearchSourceBuilder searchSourceBuilder = new SearchSourceBuilder();
-
-    searchSourceBuilder.from(offset);
-    searchSourceBuilder.size(count);
-
-    BoolQueryBuilder finalQuery = buildQuery(
-        sourceType,
-        sourceEntityFilter,
-        destinationType,
-        destinationEntityFilter,
-        relationshipTypes,
-        relationshipFilter
-    );
-
-    searchSourceBuilder.query(finalQuery);
-
-    searchRequest.source(searchSourceBuilder);
-
-    searchRequest.indices(indexConvention.getIndexName(INDEX_NAME));
-
-    try (Timer.Context ignored = MetricUtils.timer(this.getClass(), "esQuery").time()) {
-      final SearchResponse searchResponse = client.search(searchRequest, RequestOptions.DEFAULT);
-      return searchResponse;
-    } catch (IOException e) {
-      e.printStackTrace();
-    }
-    return null;
+      @Nonnull OperationContext opContext,
+      @Nonnull GraphFilters filters,
+      int offset,
+      @Nullable Integer count) {
+    return delegate.getSearchResponse(opContext, filters, offset, count);
   }
 
-  public static BoolQueryBuilder buildQuery(
-      @Nullable final String sourceType,
-      @Nonnull  final Filter sourceEntityFilter,
-      @Nullable final String destinationType,
-      @Nonnull final Filter destinationEntityFilter,
-      @Nonnull final List<String> relationshipTypes,
-      @Nonnull final RelationshipFilter relationshipFilter
-  ) {
-    BoolQueryBuilder finalQuery = QueryBuilders.boolQuery();
-
-    final RelationshipDirection relationshipDirection = relationshipFilter.getDirection();
-
-    // set source filter
-    String sourceNode = relationshipDirection == RelationshipDirection.OUTGOING ? "source" : "destination";
-    if (sourceType != null && sourceType.length() > 0) {
-      finalQuery.must(QueryBuilders.termQuery(sourceNode + ".entityType", sourceType));
-    }
-    addCriterionToQueryBuilder(sourceEntityFilter.getCriteria(), sourceNode, finalQuery);
-
-    // set destination filter
-    String destinationNode = relationshipDirection == RelationshipDirection.OUTGOING ? "destination" : "source";
-    if (destinationType != null && destinationType.length() > 0) {
-      finalQuery.must(QueryBuilders.termQuery(destinationNode + ".entityType", destinationType));
-    }
-    addCriterionToQueryBuilder(destinationEntityFilter.getCriteria(), destinationNode, finalQuery);
-
-    // set relationship filter
-    if (relationshipTypes.size() > 0) {
-      BoolQueryBuilder relationshipQuery = QueryBuilders.boolQuery();
-      relationshipTypes.forEach(relationshipType
-          -> relationshipQuery.should(QueryBuilders.termQuery("relationshipType", relationshipType)));
-      finalQuery.must(relationshipQuery);
-    }
-    return finalQuery;
+  @Override
+  public SearchResponse getSearchResponse(
+      @Nonnull OperationContext opContext,
+      @Nonnull GraphFilters filters,
+      @Nonnull List<SortCriterion> sortCriteria,
+      @Nullable String scrollId,
+      @Nullable String keepAlive,
+      @Nullable Integer count) {
+    return delegate.getSearchResponse(opContext, filters, sortCriteria, scrollId, keepAlive, count);
   }
 
+  SearchResponse executeSearch(
+      @Nonnull OperationContext opContext, @Nonnull SearchRequest searchRequest) {
+    return delegate.executeSearch(opContext, searchRequest);
+  }
+
+  @Override
+  public void cleanupPointInTime(@Nonnull OperationContext opContext, String pitId) {
+    delegate.cleanupPointInTime(opContext, pitId);
+  }
+
+  @Override
+  public void destroy() throws Exception {
+    // Shutdown the delegate if it's a GraphQueryPITDAO
+    if (delegate instanceof GraphQueryPITDAO) {
+      ((GraphQueryPITDAO) delegate).shutdown();
+    }
+  }
 }

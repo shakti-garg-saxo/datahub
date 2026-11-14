@@ -1,35 +1,47 @@
 package com.linkedin.metadata.kafka.transformer;
 
+import static com.linkedin.metadata.Constants.*;
+import static com.linkedin.metadata.datahubusage.DataHubUsageEventConstants.*;
+
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.StreamReadConstraints;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableSet;
-import com.google.common.collect.Streams;
+import com.linkedin.metadata.datahubusage.DataHubUsageEventType;
 import com.linkedin.metadata.kafka.hydrator.EntityHydrator;
 import com.linkedin.metadata.kafka.hydrator.EntityType;
+import io.datahubproject.metadata.context.OperationContext;
+import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
+import javax.annotation.Nonnull;
 import lombok.Value;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
-import static com.linkedin.metadata.kafka.transformer.DataHubUsageEventConstants.ACTOR_URN;
-import static com.linkedin.metadata.kafka.transformer.DataHubUsageEventConstants.ENTITY_TYPE;
-import static com.linkedin.metadata.kafka.transformer.DataHubUsageEventConstants.ENTITY_URN;
-import static com.linkedin.metadata.kafka.transformer.DataHubUsageEventConstants.TIMESTAMP;
-import static com.linkedin.metadata.kafka.transformer.DataHubUsageEventConstants.TYPE;
-
-
-/**
- * Transformer that transforms usage event (schema defined HERE) into a search document
- */
+/** Transformer that transforms usage event (schema defined HERE) into a search document */
 @Slf4j
 @Component
 public class DataHubUsageEventTransformer {
   private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+  static {
+    int maxSize =
+        Integer.parseInt(
+            System.getenv()
+                .getOrDefault(INGESTION_MAX_SERIALIZED_STRING_LENGTH, MAX_JACKSON_STRING_SIZE));
+    OBJECT_MAPPER
+        .getFactory()
+        .setStreamReadConstraints(StreamReadConstraints.builder().maxStringLength(maxSize).build());
+  }
+
   private static final Set<DataHubUsageEventType> EVENTS_WITH_ENTITY_URN =
-      ImmutableSet.of(DataHubUsageEventType.SEARCH_RESULT_CLICK_EVENT, DataHubUsageEventType.BROWSE_RESULT_CLICK_EVENT,
-          DataHubUsageEventType.ENTITY_VIEW_EVENT, DataHubUsageEventType.ENTITY_SECTION_VIEW_EVENT,
+      ImmutableSet.of(
+          DataHubUsageEventType.SEARCH_RESULT_CLICK_EVENT,
+          DataHubUsageEventType.BROWSE_RESULT_CLICK_EVENT,
+          DataHubUsageEventType.ENTITY_VIEW_EVENT,
+          DataHubUsageEventType.ENTITY_SECTION_VIEW_EVENT,
           DataHubUsageEventType.ENTITY_ACTION_EVENT);
 
   private final EntityHydrator _entityHydrator;
@@ -44,7 +56,8 @@ public class DataHubUsageEventTransformer {
     this._entityHydrator = entityHydrator;
   }
 
-  public Optional<TransformedDocument> transformDataHubUsageEvent(String dataHubUsageEvent) {
+  public Optional<TransformedDocument> transformDataHubUsageEvent(
+      @Nonnull final OperationContext opContext, String dataHubUsageEvent) {
     ObjectNode usageEvent;
     try {
       usageEvent = (ObjectNode) OBJECT_MAPPER.readTree(dataHubUsageEvent);
@@ -65,36 +78,60 @@ public class DataHubUsageEventTransformer {
     }
 
     // Timestamp is required
-    if (!usageEvent.has(TIMESTAMP)) {
+    long timestampMillis;
+    if (usageEvent.get(TIMESTAMP).isNumber()) {
+      // Handle numeric timestamp (epoch milliseconds)
+      timestampMillis = usageEvent.get(TIMESTAMP).asLong();
+    } else if (usageEvent.get(TIMESTAMP).isTextual()) {
+      // Handle ISO date string
+      try {
+        String isoDate = usageEvent.get(TIMESTAMP).asText();
+        java.time.Instant instant = java.time.Instant.parse(isoDate);
+        timestampMillis = instant.toEpochMilli();
+      } catch (Exception e) {
+        log.warn(
+            "Failed to parse ISO date string: {}. Defaulting to current system time",
+            usageEvent.get(TIMESTAMP));
+        timestampMillis = Instant.now().toEpochMilli();
+      }
+    } else {
+      log.warn(
+          "Invalid timestamp format - expected number or ISO date string but got: {}",
+          usageEvent.get(TIMESTAMP));
       return Optional.empty();
     }
-    // Set @timestamp
-    eventDocument.put("@timestamp", usageEvent.get(TIMESTAMP).asLong());
+
+    log.debug("Raw timestamp value from event: {}", timestampMillis);
+    eventDocument.put("@timestamp", timestampMillis);
+    eventDocument.put("timestamp", timestampMillis);
+    log.debug("Event document after setting timestamps: {}", eventDocument);
 
     // Hydrate actor fields
-    setFieldsForEntity(EntityType.CORP_USER, usageEvent.get(ACTOR_URN).asText(), eventDocument);
+    setFieldsForEntity(
+        opContext, EntityType.CORP_USER, usageEvent.get(ACTOR_URN).asText(), eventDocument);
 
     // Hydrate entity fields for events with entity URN
     if (EVENTS_WITH_ENTITY_URN.contains(eventType)) {
-      setFieldsForEntity(ENTITY_TYPE, ENTITY_URN, usageEvent, eventDocument);
+      setFieldsForEntity(opContext, usageEvent, eventDocument);
     }
 
     try {
-      return Optional.of(
-          new TransformedDocument(getId(eventDocument), OBJECT_MAPPER.writeValueAsString(eventDocument)));
+      String serializedDoc = OBJECT_MAPPER.writeValueAsString(eventDocument);
+      log.debug("Final serialized document: {}", serializedDoc);
+      return Optional.of(new TransformedDocument(getId(eventDocument), serializedDoc));
     } catch (JsonProcessingException e) {
-      log.info("Failed to package document: {}", eventDocument.toString());
+      log.error("Failed to package document: {}", eventDocument);
       return Optional.empty();
     }
   }
 
-  private void setFieldsForEntity(String entityTypeKey, String urnKey, ObjectNode recordObject,
-      ObjectNode searchObject) {
-    if (!recordObject.has(entityTypeKey) || !recordObject.has(urnKey)) {
+  private void setFieldsForEntity(
+      @Nonnull final OperationContext opContext, ObjectNode recordObject, ObjectNode searchObject) {
+    if (!recordObject.has(ENTITY_TYPE) || !recordObject.has(ENTITY_URN)) {
       return;
     }
 
-    String entityType = recordObject.get(entityTypeKey).asText();
+    String entityType = recordObject.get(ENTITY_TYPE).asText();
     EntityType type;
     try {
       type = EntityType.valueOf(entityType);
@@ -103,22 +140,34 @@ public class DataHubUsageEventTransformer {
       return;
     }
 
-    setFieldsForEntity(type, recordObject.get(urnKey).asText(), searchObject);
+    setFieldsForEntity(opContext, type, recordObject.get(ENTITY_URN).asText(), searchObject);
   }
 
-  private void setFieldsForEntity(EntityType entityType, String urn, ObjectNode searchObject) {
-    Optional<ObjectNode> entityObject = _entityHydrator.getHydratedEntity(urn);
+  private void setFieldsForEntity(
+      @Nonnull final OperationContext opContext,
+      EntityType entityType,
+      String urn,
+      ObjectNode searchObject) {
+    Optional<ObjectNode> entityObject = _entityHydrator.getHydratedEntity(opContext, urn);
     if (!entityObject.isPresent()) {
       log.info("No matches for urn {}", urn);
       return;
     }
-    Streams.stream(entityObject.get().fieldNames())
-        .forEach(
-            key -> searchObject.put(entityType.name().toLowerCase() + "_" + key, entityObject.get().get(key).asText()));
+    entityObject
+        .get()
+        .fieldNames()
+        .forEachRemaining(
+            key ->
+                searchObject.put(
+                    entityType.name().toLowerCase() + "_" + key,
+                    entityObject.get().get(key).asText()));
   }
 
   private String getId(final ObjectNode eventDocument) {
-    return eventDocument.get(TYPE).asText() + "_" + eventDocument.get(ACTOR_URN).asText() + "_" + eventDocument.get(
-        TIMESTAMP).asText();
+    return eventDocument.get(TYPE).asText()
+        + "_"
+        + eventDocument.get(ACTOR_URN).asText()
+        + "_"
+        + eventDocument.get(TIMESTAMP).asText();
   }
 }

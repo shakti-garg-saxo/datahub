@@ -1,0 +1,34 @@
+namespace com.linkedin.application
+
+import com.linkedin.common.Urn
+
+/**
+ * Links from an Asset to its Applications
+ */
+@Aspect = {
+  "name": "applications"
+}
+record Applications {
+  /**
+   * The Applications attached to an Asset
+   */
+  @Relationship = {
+    "/*": {
+      "name": "AssociatedWith",
+      "entityTypes": [ "application" ]
+    }
+  }
+  @Searchable = {
+    "/*": {
+      "fieldName": "applications",
+      "fieldType": "URN",
+      "hasValuesFieldName": "hasApplication",
+      "addToFilters": true,
+      "filterNameOverride": "Application",
+      "v3": {
+        "copyToOther": true
+      }
+    }
+  }
+  applications: array[Urn]
+}

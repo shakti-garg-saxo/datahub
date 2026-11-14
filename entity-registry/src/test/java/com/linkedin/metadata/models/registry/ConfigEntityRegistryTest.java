@@ -1,32 +1,37 @@
 package com.linkedin.metadata.models.registry;
 
+import static org.testng.Assert.*;
+
 import com.datahub.test.TestEntityProfile;
 import com.linkedin.data.schema.annotation.PathSpecBasedSchemaAnnotationVisitor;
 import com.linkedin.metadata.models.EntitySpec;
+import com.linkedin.metadata.models.EventSpec;
 import java.io.FileNotFoundException;
 import java.util.Map;
 import org.testng.annotations.BeforeTest;
 import org.testng.annotations.Test;
 
-import static org.testng.Assert.assertEquals;
-import static org.testng.Assert.assertNotNull;
-
-
 public class ConfigEntityRegistryTest {
 
   @BeforeTest
   public void disableAssert() {
-    PathSpecBasedSchemaAnnotationVisitor.class.getClassLoader()
+    PathSpecBasedSchemaAnnotationVisitor.class
+        .getClassLoader()
         .setClassAssertionStatus(PathSpecBasedSchemaAnnotationVisitor.class.getName(), false);
   }
 
   @Test
   public void testEntityRegistry() throws FileNotFoundException {
-    ConfigEntityRegistry configEntityRegistry = new ConfigEntityRegistry(
-        TestEntityProfile.class.getClassLoader().getResourceAsStream("test-entity-registry.yml"));
+    ConfigEntityRegistry configEntityRegistry =
+        new ConfigEntityRegistry(
+            TestEntityProfile.class
+                .getClassLoader()
+                .getResourceAsStream("test-entity-registry.yml"));
 
     Map<String, EntitySpec> entitySpecs = configEntityRegistry.getEntitySpecs();
+    Map<String, EventSpec> eventSpecs = configEntityRegistry.getEventSpecs();
     assertEquals(entitySpecs.values().size(), 2);
+    assertEquals(eventSpecs.values().size(), 1);
 
     EntitySpec entitySpec = configEntityRegistry.getEntitySpec("dataset");
     assertEquals(entitySpec.getName(), "dataset");
@@ -44,5 +49,19 @@ public class ConfigEntityRegistryTest {
     assertNotNull(entitySpec.getAspectSpec("chartKey"));
     assertNotNull(entitySpec.getAspectSpec("chartInfo"));
     assertNotNull(entitySpec.getAspectSpec("status"));
+
+    EventSpec eventSpec = configEntityRegistry.getEventSpec("testEvent");
+    assertEquals(eventSpec.getName(), "testEvent");
+    assertNotNull(eventSpec.getPegasusSchema());
+  }
+
+  @Test
+  public void testEntityRegistryIdentifier() throws FileNotFoundException {
+    ConfigEntityRegistry configEntityRegistry =
+        new ConfigEntityRegistry(
+            TestEntityProfile.class
+                .getClassLoader()
+                .getResourceAsStream("test-entity-registry.yml"));
+    assertEquals(configEntityRegistry.getIdentifier(), "test-registry");
   }
 }

@@ -1,38 +1,56 @@
 # Defining environment
 ARG APP_ENV=prod
 
-FROM adoptopenjdk/openjdk8:alpine-jre as base
-ENV DOCKERIZE_VERSION v0.6.1
-RUN apk --no-cache add curl tar wget \
-    && wget https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v1.4.1/opentelemetry-javaagent-all.jar \
-    && wget https://repo1.maven.org/maven2/io/prometheus/jmx/jmx_prometheus_javaagent/0.16.1/jmx_prometheus_javaagent-0.16.1.jar -O jmx_prometheus_javaagent.jar \
-    && curl -L https://github.com/jwilder/dockerize/releases/download/$DOCKERIZE_VERSION/dockerize-linux-amd64-$DOCKERIZE_VERSION.tar.gz | tar -C /usr/local/bin -xzv
+ARG BASE_IMAGE=cgr.dev/chainguard/wolfi-base:latest
+FROM ${BASE_IMAGE} AS base
 
-FROM openjdk:8 as prod-build
-COPY . datahub-src
-RUN cd datahub-src && ./gradlew :metadata-jobs:mce-consumer-job:build
-RUN cd datahub-src && cp metadata-jobs/mce-consumer-job/build/libs/mce-consumer-job.jar ../mce-consumer-job.jar
+ARG APK_REPOSITORY_URL=https://apk.cgr.dev/chainguard
+ARG GITHUB_REPO_URL=https://github.com
+ARG MAVEN_CENTRAL_REPO_URL=https://repo1.maven.org/maven2
 
-FROM base as prod-install
-COPY --from=prod-build /mce-consumer-job.jar /datahub/datahub-mce-consumer/bin/
-COPY --from=prod-build /datahub-src/docker/datahub-mce-consumer/start.sh /datahub/datahub-mce-consumer/scripts/
-COPY --from=prod-build /datahub-src/docker/monitoring/client-prometheus-config.yaml /datahub/datahub-mce-consumer/scripts/prometheus-config.yaml
-RUN chmod +x /datahub/datahub-mce-consumer/scripts/start.sh
+ENV JMX_VERSION=1.0.1
 
-FROM base as dev-install
+RUN printf '%s\n' "${APK_REPOSITORY_URL}" > /etc/apk/repositories \
+    && apk update --no-cache \
+    && apk upgrade --no-cache
+
+COPY docker/snippets/setup_java_runtime.sh /tmp/setup_java_runtime.sh
+RUN --mount=type=cache,target=/var/cache/apk,sharing=locked \
+    chmod +x /tmp/setup_java_runtime.sh \
+    && INSTALL_JATTACH=1 OTEL_JMX_DIR=/ /tmp/setup_java_runtime.sh \
+    && rm -f /tmp/setup_java_runtime.sh
+
+COPY docker/snippets/wait_for_deps.sh /usr/local/lib/datahub/wait_for_deps.sh
+
+RUN addgroup -S datahub && adduser -S datahub -G datahub && chmod g-s /home/datahub
+
+FROM base AS prod-install
+COPY metadata-jobs/mce-consumer-job/build/libs/mce-consumer-job.jar /datahub/datahub-mce-consumer/bin/
+COPY metadata-models/src/main/resources/entity-registry.yml /datahub/datahub-mce-consumer/resources/entity-registry.yml
+COPY --chmod=755 docker/datahub-mce-consumer/start.sh /datahub/datahub-mce-consumer/scripts/
+COPY docker/monitoring/client-prometheus-config.yaml /datahub/datahub-mce-consumer/scripts/prometheus-config.yaml
+
+FROM base AS dev-install
 # Dummy stage for development. Assumes code is built on your machine and mounted to this image.
 # See this excellent thread https://github.com/docker/cli/issues/1134
+COPY metadata-models/src/main/resources/entity-registry.yml /datahub/datahub-mce-consumer/resources/entity-registry.yml
 
-FROM ${APP_ENV}-install as final
-
-RUN addgroup -S datahub && adduser -S datahub -G datahub
+FROM ${APP_ENV}-install AS final
 USER datahub
 
 ENV JMX_OPTS=""
 ENV JAVA_OPTS=""
+# application-mce.yaml holds the port, health checks, GMS URI, and cache defaults.
+# An explicit SPRING_PROFILES_ACTIVE still overrides this image default.
+ENV SPRING_PROFILES_ACTIVE=mce
+ENV OTEL_EXPORTER_OTLP_MAX_PAYLOAD_SIZE=4194304 \
+    OTEL_EXPORTER_OTLP_HTTP_HTTP2_MAX_FRAME_SIZE=16777215 \
+    OTEL_EXPORTER_OTLP_HTTP_COMPRESSION=gzip \
+    OTEL_EXPORTER_OTLP_TRACES_COMPRESSION=gzip
 
 EXPOSE 9090
+EXPOSE 4319
 
-HEALTHCHECK --start-period=2m --retries=4 CMD curl --fail http://localhost:9090/actuator/health || exit 1
+HEALTHCHECK --start-period=2m --retries=4 CMD curl --fail http://localhost:4319/actuator/health || curl --fail http://localhost:9090/actuator/health || exit 1
 
 CMD /datahub/datahub-mce-consumer/scripts/start.sh

@@ -1,0 +1,96 @@
+namespace com.linkedin.form
+
+import com.linkedin.common.Urn
+
+/**
+ * A prompt to present to the user to encourage filling out metadata
+ */
+record FormPrompt {
+  /**
+   * The unique id for this prompt. This must be GLOBALLY unique.
+   */
+  @Searchable = {
+    "fieldType": "KEYWORD",
+    "fieldName": "promptId",
+    "queryByDefault": false,
+  }
+  id: string
+
+  /**
+   * The title of this prompt
+   */
+  @Searchable = {
+    "fieldType": "WORD_GRAM",
+    "queryByDefault": false,
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "boostScore": 10.0,
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  title: string
+
+  /**
+   * The description of this prompt
+   */
+  @Searchable = {
+    "fieldType": "TEXT",
+    "queryByDefault": false,
+    "hasValuesFieldName": "hasDescription",
+    "sanitizeRichText": true,
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  description: optional string
+
+  /**
+   * The type of prompt
+   */
+  type: enum FormPromptType {
+    /**
+     * This prompt is meant to apply a structured property to an entity
+     */
+    STRUCTURED_PROPERTY
+    /**
+     * This prompt is meant to apply a structured property to a schema fields entity
+     */
+    FIELDS_STRUCTURED_PROPERTY
+  }
+
+  /**
+   * An optional set of information specific to structured properties prompts.
+   * This should be filled out if the prompt is type STRUCTURED_PROPERTY or FIELDS_STRUCTURED_PROPERTY.
+   */
+  structuredPropertyParams: optional record StructuredPropertyParams {
+    /**
+     * The structured property that is required on this entity
+     */
+    @Searchable = {
+      "fieldType": "URN",
+      "fieldName": "structuredPropertyPromptUrns",
+      "queryByDefault": false,
+      "v3": {
+        "queryByDefault": false
+      }
+    }
+    urn: Urn
+  }
+
+  /**
+   * Whether the prompt is required to be completed, in order for the form to be marked as complete.
+   */
+   required: boolean = false
+}

@@ -1,0 +1,25 @@
+namespace com.linkedin.knowledge
+
+/**
+ * The contents of a document
+ */
+record DocumentContents {
+    /**
+     * The text contents of the document.
+     * This needs to be added to semantic search! 
+     */
+    @Searchable = {
+      "fieldType": "RICH_TEXT",
+      "v3": {
+        "queryByDefault": true,
+        "boostScore": 1.0,
+        "searchLabel": "text",
+        "mappings": [
+          { "type": "KEYWORD", "index": false, "docValues": false },
+          { "subfield": "text", "type": "TEXT" },
+          { "subfield": "stemmed", "type": "STEMMED" }
+        ]
+      }
+    }
+    text: string
+}

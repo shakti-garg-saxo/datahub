@@ -1,45 +1,153 @@
 package com.linkedin.metadata.search.elasticsearch.update;
 
-import com.linkedin.metadata.models.registry.EntityRegistry;
-import com.linkedin.metadata.utils.elasticsearch.IndexConvention;
-import java.io.IOException;
-import javax.annotation.Nonnull;
-import lombok.extern.slf4j.Slf4j;
-import org.elasticsearch.action.bulk.BackoffPolicy;
-import org.elasticsearch.action.bulk.BulkProcessor;
-import org.elasticsearch.action.delete.DeleteRequest;
-import org.elasticsearch.action.index.IndexRequest;
-import org.elasticsearch.action.update.UpdateRequest;
-import org.elasticsearch.client.RequestOptions;
-import org.elasticsearch.client.RestHighLevelClient;
-import org.elasticsearch.client.indices.GetIndexRequest;
-import org.elasticsearch.client.indices.GetIndexResponse;
-import org.elasticsearch.common.unit.TimeValue;
-import org.elasticsearch.common.xcontent.XContentType;
-import org.elasticsearch.index.query.QueryBuilders;
-import org.elasticsearch.index.reindex.DeleteByQueryRequest;
+import static com.linkedin.metadata.Constants.READ_ONLY_LOG;
+import static org.opensearch.index.reindex.AbstractBulkByScrollRequest.AUTO_SLICES;
+import static org.opensearch.index.reindex.AbstractBulkByScrollRequest.AUTO_SLICES_VALUE;
 
+import com.google.common.annotations.VisibleForTesting;
+import com.linkedin.metadata.config.search.BulkDeleteConfiguration;
+import com.linkedin.metadata.config.search.ElasticSearchConfiguration;
+import com.linkedin.metadata.config.search.EntityIndexConfiguration;
+import com.linkedin.metadata.config.search.SearchComponent;
+import com.linkedin.metadata.search.elasticsearch.SearchClients;
+import com.linkedin.metadata.search.elasticsearch.SearchWriteAccess;
+import com.linkedin.metadata.search.elasticsearch.index.entity.v3.V3SearchDocumentWrite;
+import com.linkedin.metadata.search.elasticsearch.indexbuilder.IndexDeletionUtils;
+import com.linkedin.metadata.service.RetryableIndexingException;
+import com.linkedin.metadata.service.SearchIndexFailureClassifier;
+import com.linkedin.metadata.utils.elasticsearch.SearchClientShim;
+import com.linkedin.metadata.utils.elasticsearch.responses.GetIndexResponse;
+import io.datahubproject.metadata.context.OperationContext;
+import java.io.IOException;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import javax.annotation.Nonnull;
+import javax.annotation.Nullable;
+import lombok.Builder;
+import lombok.Data;
+import lombok.Getter;
+import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.lang3.StringUtils;
+import org.opensearch.action.DocWriteRequest;
+import org.opensearch.action.delete.DeleteRequest;
+import org.opensearch.action.get.GetRequest;
+import org.opensearch.action.get.GetResponse;
+import org.opensearch.action.index.IndexRequest;
+import org.opensearch.action.update.UpdateRequest;
+import org.opensearch.client.RequestOptions;
+import org.opensearch.client.core.CountRequest;
+import org.opensearch.client.core.CountResponse;
+import org.opensearch.client.indices.GetIndexRequest;
+import org.opensearch.client.tasks.GetTaskRequest;
+import org.opensearch.client.tasks.GetTaskResponse;
+import org.opensearch.client.tasks.TaskId;
+import org.opensearch.common.unit.TimeValue;
+import org.opensearch.common.xcontent.XContentType;
+import org.opensearch.index.query.QueryBuilder;
+import org.opensearch.index.reindex.DeleteByQueryRequest;
+import org.opensearch.script.Script;
+import org.opensearch.script.ScriptType;
 
 @Slf4j
 public class ESWriteDAO {
+  private final ElasticSearchConfiguration config;
+  private final SearchClientShim<?> searchClient;
+  @Getter private final ESBulkProcessor bulkProcessor;
+  @Nonnull private final SearchWriteAccess writeAccess;
+  private boolean canWrite = true;
 
-  private final EntityRegistry entityRegistry;
-  private final RestHighLevelClient searchClient;
-  private final BulkProcessor bulkProcessor;
-  private final IndexConvention indexConvention;
+  /**
+   * V3 indices verified to exist, so writers refuse to auto-create them (see {@link
+   * #ensureV3IndexExists}) and the read-before-write in {@link #getV3DocumentSourceBySearchGroup}
+   * skips its own existence check. Positive results are cached for the process lifetime; the
+   * documented rebuild procedure scales writers down before deleting a V3 index, so a cached entry
+   * cannot mask a legitimate rebuild.
+   */
+  private final Set<String> verifiedV3Indices = ConcurrentHashMap.newKeySet();
 
-  public ESWriteDAO(EntityRegistry entityRegistry, RestHighLevelClient searchClient, IndexConvention indexConvention,
-      int bulkRequestsLimit, int bulkFlushPeriod, int numRetries, long retryInterval) {
-    this.entityRegistry = entityRegistry;
-    this.indexConvention = indexConvention;
+  public ESWriteDAO(
+      ElasticSearchConfiguration config,
+      SearchClientShim<?> searchClient,
+      ESBulkProcessor bulkProcessor,
+      @Nonnull SearchWriteAccess writeAccess) {
+    this.config = config;
     this.searchClient = searchClient;
-    this.bulkProcessor = BulkProcessor.builder(
-        (request, bulkListener) -> searchClient.bulkAsync(request, RequestOptions.DEFAULT, bulkListener),
-        BulkListener.getInstance())
-        .setBulkActions(bulkRequestsLimit)
-        .setFlushInterval(TimeValue.timeValueSeconds(bulkFlushPeriod))
-        .setBackoffPolicy(BackoffPolicy.constantBackoff(TimeValue.timeValueSeconds(retryInterval), numRetries))
-        .build();
+    this.bulkProcessor = bulkProcessor;
+    this.writeAccess = writeAccess;
+  }
+
+  /** Every bulk processor a write through this DAO can land on, one per distinct cluster. */
+  @Nonnull
+  public Collection<ESBulkProcessor> bulkProcessors() {
+    return writeAccess.bulkProcessors();
+  }
+
+  @Nonnull
+  private ESBulkProcessor bulkProcessorFor(
+      @Nonnull OperationContext opContext, @Nonnull SearchComponent component) {
+    return writeAccess.bulkProcessorFor(component);
+  }
+
+  @Nonnull
+  private ESBulkProcessor bulkProcessorForIndex(
+      @Nonnull OperationContext opContext, @Nonnull String indexName) {
+    return writeAccess.bulkProcessorForIndex(
+        opContext.getSearchContext().getIndexConvention(), indexName);
+  }
+
+  /**
+   * This DAO serves every DataHub-managed index, not just entity families: graph, timeseries,
+   * system-metadata and usage all route through here by name.
+   */
+  @Nonnull
+  private SearchClientShim<?> clientForIndex(
+      @Nonnull OperationContext opContext, @Nonnull String indexName) {
+    return SearchClients.forIndex(opContext, indexName);
+  }
+
+  /**
+   * Cleanup patterns are wildcards ({@code *index_v3*}), not always aliases. Resolve the family
+   * from the marker so V3 patterns are not sent to the V2 client.
+   */
+  @Nonnull
+  private SearchClientShim<?> clientForPattern(
+      @Nonnull OperationContext opContext, @Nonnull String pattern) {
+    return SearchClients.forEntityIndices(opContext, pattern);
+  }
+
+  public void setWritable(boolean writable) {
+    canWrite = writable;
+  }
+
+  /**
+   * V3 search-group indices only exist when the V3 entity index is enabled. Writing to them
+   * otherwise would auto-create an unmapped index.
+   */
+  private boolean isV3Enabled() {
+    EntityIndexConfiguration entityIndex = config.getEntityIndex();
+    return entityIndex != null && entityIndex.getV3() != null && entityIndex.getV3().isEnabled();
+  }
+
+  /** Result of a delete by query operation */
+  @Data
+  @Builder
+  public static class DeleteByQueryResult {
+    private final long timeTaken;
+    private final boolean success;
+    private final String failureReason;
+    private final long remainingDocuments;
+    private final int retryAttempts;
+    private final TaskId taskId;
   }
 
   /**
@@ -49,12 +157,59 @@ public class ESWriteDAO {
    * @param document the document to update / insert
    * @param docId the ID of the document
    */
-  public void upsertDocument(@Nonnull String entityName, @Nonnull String document, @Nonnull String docId) {
-    final String indexName = indexConvention.getIndexName(entityRegistry.getEntitySpec(entityName));
-    final IndexRequest indexRequest = new IndexRequest(indexName).id(docId).source(document, XContentType.JSON);
+  public void upsertDocument(
+      @Nonnull OperationContext opContext,
+      @Nonnull String entityName,
+      @Nonnull String document,
+      @Nonnull String docId) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    if (v2EntityIndexDisabled()) {
+      log.debug(
+          "Skipping V2 entity document upsert for {}; elasticsearch.entityIndex.v2.enabled is false",
+          entityName);
+      return;
+    }
     final UpdateRequest updateRequest =
-        new UpdateRequest(indexName, docId).doc(document, XContentType.JSON).detectNoop(false).upsert(indexRequest);
-    bulkProcessor.add(updateRequest);
+        new UpdateRequest(toIndexName(opContext, entityName), docId)
+            .detectNoop(false)
+            .docAsUpsert(true)
+            .doc(document, XContentType.JSON)
+            .retryOnConflict(config.getBulkProcessor().getNumRetries());
+
+    // Route by docId (URL-encoded URN) so repeated aspect writes for the same entity
+    // land on the same bulk processor thread. Without this, concurrent same-URN updates
+    // race on OpenSearch's seqNo and retryOnConflict cannot converge — partial updates
+    // are silently dropped and the indexed doc ends up with only bootstrap fields.
+    bulkProcessorFor(opContext, SearchComponent.SEARCH_V2).add(opContext, docId, updateRequest);
+  }
+
+  /**
+   * Updates or inserts the given search document in a named index.
+   *
+   * @param indexName name of the index
+   * @param document the document to update / insert
+   * @param docId the ID of the document
+   */
+  public void upsertDocumentByIndexName(
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull String document,
+      @Nonnull String docId) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    final UpdateRequest updateRequest =
+        new UpdateRequest(indexName, docId)
+            .detectNoop(false)
+            .docAsUpsert(true)
+            .doc(document, XContentType.JSON)
+            .retryOnConflict(config.getBulkProcessor().getNumRetries());
+
+    bulkProcessorForIndex(opContext, indexName).add(opContext, docId, updateRequest);
   }
 
   /**
@@ -63,31 +218,813 @@ public class ESWriteDAO {
    * @param entityName name of the entity
    * @param docId the ID of the document to delete
    */
-  public void deleteDocument(@Nonnull String entityName, @Nonnull String docId) {
-    final String indexName = indexConvention.getIndexName(entityRegistry.getEntitySpec(entityName));
-    bulkProcessor.add(new DeleteRequest(indexName).id(docId));
+  public void deleteDocument(
+      @Nonnull OperationContext opContext, @Nonnull String entityName, @Nonnull String docId) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    if (v2EntityIndexDisabled()) {
+      log.debug(
+          "Skipping V2 entity document delete for {}; elasticsearch.entityIndex.v2.enabled is false",
+          entityName);
+      return;
+    }
+    bulkProcessorFor(opContext, SearchComponent.SEARCH_V2)
+        .add(opContext, docId, new DeleteRequest(toIndexName(opContext, entityName)).id(docId));
   }
 
   /**
-   * Clear all documents in all the indices
+   * Deletes the document with the given document ID from the specified index. This method works
+   * directly with index names, useful for V3 multi-entity indices.
+   *
+   * @param indexName name of the index
+   * @param docId the ID of the document to delete
    */
-  public void clear() {
-    String[] indices = getIndices(indexConvention.getAllEntityIndicesPattern());
-    DeleteByQueryRequest deleteRequest = new DeleteByQueryRequest(indices).setQuery(QueryBuilders.matchAllQuery());
+  public void deleteDocumentByIndexName(
+      @Nonnull OperationContext opContext, @Nonnull String indexName, @Nonnull String docId) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    bulkProcessorForIndex(opContext, indexName)
+        .add(opContext, docId, new DeleteRequest(indexName).id(docId));
+  }
+
+  /**
+   * Checks if the given index exists in OpenSearch.
+   *
+   * @param indexName name of the index to check
+   * @return true if the index exists, false otherwise
+   */
+  public boolean indexExists(@Nonnull OperationContext opContext, @Nonnull String indexName) {
     try {
-      searchClient.deleteByQuery(deleteRequest, RequestOptions.DEFAULT);
-    } catch (Exception e) {
-      log.error("Failed to delete content of search indices: {}", e.toString());
+      return clientForIndex(opContext, indexName)
+          .indexExists(opContext, new GetIndexRequest(indexName), RequestOptions.DEFAULT);
+    } catch (IOException e) {
+      log.warn("Error checking if index {} exists: {}", indexName, e.getMessage());
+      return false;
     }
   }
 
-  private String[] getIndices(String pattern) {
+  public Optional<Map<String, Object>> getV3DocumentSourceBySearchGroup(
+      @Nonnull OperationContext opContext,
+      @Nonnull final String searchGroup,
+      @Nonnull final String docId)
+      throws IOException {
+    final String indexName = toIndexNameV3(opContext, searchGroup);
+    final SearchClientShim<?> client = clientForIndex(opContext, indexName);
+    // Every V3 write reads the current document first, so this check would otherwise be a round
+    // trip per URN; once an index is known to exist the GET alone answers the question.
+    if (!verifiedV3Indices.contains(indexName)) {
+      if (!client.indexExists(opContext, new GetIndexRequest(indexName), RequestOptions.DEFAULT)) {
+        return Optional.empty();
+      }
+      verifiedV3Indices.add(indexName);
+    }
+    final GetResponse response =
+        client.getDocument(opContext, new GetRequest(indexName, docId), RequestOptions.DEFAULT);
+    if (!response.isExists()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(response.getSourceAsMap());
+  }
+
+  /**
+   * Updates or inserts the given search document in the V3 index for the specified search group.
+   * This method uses the index convention to properly construct the V3 index name.
+   *
+   * @param opContext the operation context
+   * @param searchGroup the search group name
+   * @param document the document to update / insert
+   * @param docId the ID of the document
+   */
+  public void upsertDocumentBySearchGroup(
+      @Nonnull OperationContext opContext,
+      @Nonnull String searchGroup,
+      @Nonnull String document,
+      @Nonnull String docId) {
+    if (!isV3Enabled()) {
+      log.debug("V3 entity index disabled, skipping upsert for searchGroup {}", searchGroup);
+      return;
+    }
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    ensureV3IndexExists(opContext, toIndexNameV3(opContext, searchGroup));
+    final UpdateRequest updateRequest =
+        new UpdateRequest(toIndexNameV3(opContext, searchGroup), docId)
+            .detectNoop(false)
+            .docAsUpsert(true)
+            .doc(document, XContentType.JSON)
+            .retryOnConflict(config.getBulkProcessor().getNumRetries());
+
+    // using it as the routing key serializes concurrent aspect writes for the same entity
+    // on one bulk processor thread (preventing version_conflict_engine_exception).
+    bulkProcessorFor(opContext, SearchComponent.SEARCH_V3).add(opContext, docId, updateRequest);
+  }
+
+  /**
+   * Deletes the document with the given document ID from the V3 index for the specified search
+   * group. This method uses the index convention to properly construct the V3 index name.
+   *
+   * @param opContext the operation context
+   * @param searchGroup the search group name
+   * @param docId the ID of the document to delete
+   */
+  public void deleteDocumentBySearchGroup(
+      @Nonnull OperationContext opContext, @Nonnull String searchGroup, @Nonnull String docId) {
+    if (!isV3Enabled()) {
+      log.debug("V3 entity index disabled, skipping delete for searchGroup {}", searchGroup);
+      return;
+    }
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    // Stable-id routing — see upsertDocumentBySearchGroup above.
+    bulkProcessorFor(opContext, SearchComponent.SEARCH_V3)
+        .add(opContext, docId, new DeleteRequest(toIndexNameV3(opContext, searchGroup)).id(docId));
+  }
+
+  /**
+   * Writes a V3 search document as its {@link V3SearchDocumentWrite.Kind} says. No write carries an
+   * external version: live and catch-up writes for one entity reach the index in change-log order,
+   * and the fill into a target index, which does not, only creates documents that are absent.
+   */
+  public void writeV3SearchDocument(
+      @Nonnull OperationContext opContext, @Nonnull final V3SearchDocumentWrite write) {
+    if (!isV3Enabled()) {
+      log.debug("V3 entity index disabled, skipping write to {}", write.indexName());
+      return;
+    }
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    ensureV3IndexExists(opContext, write.indexName());
+
+    // Stable-id bulk-thread routing — docId is stable per entity. See
+    // upsertDocumentBySearchGroup above.
+    final DocWriteRequest<?> request =
+        switch (write.kind()) {
+          case MERGE, MERGE_EXISTING ->
+              new UpdateRequest(write.indexName(), write.docId())
+                  .doc(write.source(), XContentType.JSON)
+                  .docAsUpsert(write.kind() == V3SearchDocumentWrite.Kind.MERGE)
+                  .detectNoop(false)
+                  .retryOnConflict(config.getBulkProcessor().getNumRetries());
+          case CREATE ->
+              new IndexRequest(write.indexName())
+                  .id(write.docId())
+                  .source(write.source(), XContentType.JSON)
+                  .opType(DocWriteRequest.OpType.CREATE);
+          case REPLACE, TOMBSTONE ->
+              new IndexRequest(write.indexName())
+                  .id(write.docId())
+                  .source(write.source(), XContentType.JSON);
+          case DELETE -> new DeleteRequest(write.indexName()).id(write.docId());
+        };
+    bulkProcessorFor(opContext, SearchComponent.SEARCH_V3).add(opContext, write.docId(), request);
+  }
+
+  /**
+   * Refuses V3 writes until the target index exists. V3 indices are direct-named (no write alias),
+   * so a bulk write against a missing index would auto-create it with dynamic mappings — typing
+   * system fields such as {@code urn} and {@code _entityType} as analyzed {@code text} and breaking
+   * keyword reads. This enforces the documented ordering (system-update builds the indices before
+   * writers start) instead of assuming it. Existence is re-checked on every write until it passes,
+   * then cached for the process lifetime.
+   */
+  private void ensureV3IndexExists(@Nonnull OperationContext opContext, @Nonnull String indexName) {
+    if (verifiedV3Indices.contains(indexName)) {
+      return;
+    }
+    final boolean exists;
     try {
-      GetIndexResponse response = searchClient.indices().get(new GetIndexRequest(pattern), RequestOptions.DEFAULT);
+      exists =
+          clientForIndex(opContext, indexName)
+              .indexExists(opContext, new GetIndexRequest(indexName), RequestOptions.DEFAULT);
+    } catch (IOException | RuntimeException e) {
+      // A missing index returns false (not an exception), so a thrown exception here is a transport
+      // failure, not "index absent". The OpenSearch path surfaces it as a checked IOException, but
+      // the ES8 client throws an unchecked status-bearing co.elastic...ElasticsearchException (and
+      // the OpenSearch shim an unchecked OpenSearchStatusException) — catch those runtime
+      // exceptions
+      // too so they route through the same classifier instead of escaping unwrapped and letting the
+      // consumer commit past the missing write. Transient ones (429/5xx, connection
+      // reset/refused/closed, no-response, socket timeout) escalate as retryable so the MAE
+      // transports redeliver this write instead of committing and losing it; a persistent
+      // config/auth failure (4xx) stays a hard IllegalStateException. Same classification as the
+      // read-time hydration path.
+      if (e instanceof RetryableIndexingException retryable) {
+        throw retryable;
+      }
+      if (SearchIndexFailureClassifier.isRetryableTransportFailure(e)) {
+        throw new RetryableIndexingException(
+            "Could not verify V3 index "
+                + indexName
+                + " exists before writing (transient transport failure); redelivering",
+            e);
+      }
+      throw new IllegalStateException(
+          "Could not verify V3 index " + indexName + " exists before writing", e);
+    }
+    if (!exists) {
+      throw new IllegalStateException(
+          "V3 index "
+              + indexName
+              + " does not exist; refusing to auto-create it with dynamic mappings. Run the"
+              + " system-update job (with ELASTICSEARCH_ENTITY_INDEX_V3_WRITE_ENABLED=true) to"
+              + " build it first.");
+    }
+    verifiedV3Indices.add(indexName);
+  }
+
+  /** Applies a script to a particular document */
+  public void applyScriptUpdate(
+      @Nonnull OperationContext opContext,
+      @Nonnull String entityName,
+      @Nonnull String docId,
+      @Nonnull String scriptSource,
+      @Nonnull Map<String, Object> scriptParams,
+      Map<String, Object> upsert) {
+    if (v2EntityIndexDisabled()) {
+      log.debug(
+          "Skipping V2 entity script update for {}; elasticsearch.entityIndex.v2.enabled is false",
+          entityName);
+      return;
+    }
+    applyScriptUpdateByIndexName(
+        opContext, toIndexName(opContext, entityName), docId, scriptSource, scriptParams, upsert);
+  }
+
+  /**
+   * Applies a script to a particular document in a specific index. This method works directly with
+   * index names, useful for applying script updates to semantic indices.
+   *
+   * @param indexName the name of the index
+   * @param docId the document ID
+   * @param scriptSource the script source code
+   * @param scriptParams the script parameters
+   * @param upsert the document to upsert if it doesn't exist, or null to update only an existing
+   *     document
+   */
+  public void applyScriptUpdateByIndexName(
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull String docId,
+      @Nonnull String scriptSource,
+      @Nonnull Map<String, Object> scriptParams,
+      @Nullable Map<String, Object> upsert) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return;
+    }
+    // Create a properly parameterized script
+    Script script =
+        new Script(
+            ScriptType.INLINE, // Use INLINE for scripts provided in the request
+            "painless", // Specify the script language as painless
+            scriptSource, // The script source code
+            scriptParams // The parameters map
+            );
+    UpdateRequest updateRequest =
+        new UpdateRequest(indexName, docId)
+            .detectNoop(false)
+            .retryOnConflict(config.getBulkProcessor().getNumRetries())
+            .script(script);
+    if (upsert != null) {
+      updateRequest.scriptedUpsert(true).upsert(upsert);
+    }
+    // Stable-id routing via docId — see upsertDocumentBySearchGroup above.
+    bulkProcessorForIndex(opContext, indexName).add(opContext, docId, updateRequest);
+  }
+
+  /**
+   * Applies a script to a particular document in the V3 index for the specified search group.
+   *
+   * @param opContext the operation context
+   * @param searchGroup the search group name
+   * @param docId the document ID
+   * @param scriptSource the script source code
+   * @param scriptParams the script parameters
+   * @param upsert the document to upsert if it doesn't exist, or null to update only an existing
+   *     document
+   */
+  public void applyScriptUpdateBySearchGroup(
+      @Nonnull OperationContext opContext,
+      @Nonnull String searchGroup,
+      @Nonnull String docId,
+      @Nonnull String scriptSource,
+      @Nonnull Map<String, Object> scriptParams,
+      @Nullable Map<String, Object> upsert) {
+    if (!isV3Enabled()) {
+      log.debug("V3 entity index disabled, skipping script update for searchGroup {}", searchGroup);
+      return;
+    }
+    ensureV3IndexExists(opContext, toIndexNameV3(opContext, searchGroup));
+    applyScriptUpdateByIndexName(
+        opContext,
+        toIndexNameV3(opContext, searchGroup),
+        docId,
+        scriptSource,
+        scriptParams,
+        upsert);
+  }
+
+  /**
+   * Delete the index
+   *
+   * @param opContext the operation context
+   * @return set of index names that were deleted
+   */
+  @Nonnull
+  public Set<String> clear(@Nonnull OperationContext opContext) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return Collections.emptySet();
+    }
+    List<String> patterns =
+        opContext
+            .getSearchContext()
+            .getIndexConvention()
+            .getEntityIndicesCleanupPatterns(opContext, config.getEntityIndex());
+    List<String> allIndices = new ArrayList<>();
+    for (String pattern : patterns) {
+      allIndices.addAll(Arrays.asList(getIndices(opContext, pattern)));
+    }
+
+    // Track which indices (aliases or concrete) were deleted so the caller can recreate them
+    Set<String> deletedIndexNames = new HashSet<>();
+
+    // Instead of deleting all documents (inefficient), delete the indices themselves
+    for (String indexName : allIndices) {
+      try {
+        String nameToTrack =
+            IndexDeletionUtils.deleteIndex(
+                clientForIndex(opContext, indexName), opContext, indexName);
+        if (nameToTrack != null) {
+          deletedIndexNames.add(nameToTrack);
+        }
+      } catch (IOException e) {
+        log.error("Failed to delete index {} during clear operation", indexName, e);
+        throw new RuntimeException("Failed to clear index: " + indexName, e);
+      }
+    }
+
+    if (deletedIndexNames.isEmpty()) {
+      log.info("No indices were deleted");
+    } else {
+      // The deleted set may include V3 indices whose existence this process already verified;
+      // a later write would skip the existence check and auto-create the index with dynamic
+      // mappings. Drop the whole cache — it re-verifies on the next write per index.
+      verifiedV3Indices.clear();
+      log.info(
+          "Deleted {} indices. Caller should recreate them if needed.", deletedIndexNames.size());
+    }
+
+    return deletedIndexNames;
+  }
+
+  private String[] getIndices(@Nonnull OperationContext opContext, String pattern) {
+    try {
+      GetIndexResponse response =
+          clientForPattern(opContext, pattern)
+              .getIndex(opContext, new GetIndexRequest(pattern), RequestOptions.DEFAULT);
       return response.getIndices();
     } catch (IOException e) {
-      log.error("Failed to get indices using pattern {}", pattern);
-      return new String[]{};
+      // Only treat index_not_found_exception as "no indices"
+      if (e.getMessage() != null && e.getMessage().contains("index_not_found_exception")) {
+        log.debug("No indices found matching pattern {}", pattern);
+        return new String[] {};
+      }
+      // For real errors (ES down, network issues, etc.), propagate the exception
+      log.error("Failed to get indices using pattern {}", pattern, e);
+      throw new RuntimeException(
+          "Failed to communicate with Elasticsearch for pattern: " + pattern, e);
+    } catch (Exception e) {
+      // Handle OpenSearchStatusException and similar
+      if (e.getMessage() != null && e.getMessage().contains("index_not_found_exception")) {
+        log.debug("No indices found matching pattern {}", pattern);
+        return new String[] {};
+      }
+      log.error("Failed to get indices using pattern {}", pattern, e);
+      throw new RuntimeException(
+          "Failed to communicate with Elasticsearch for pattern: " + pattern, e);
     }
+  }
+
+  /**
+   * Performs an async delete by query operation (non-blocking) Returns immediately with a
+   * CompletableFuture containing the task ID
+   */
+  @Nonnull
+  public CompletableFuture<String> deleteByQueryAsync(
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nullable BulkDeleteConfiguration overrideConfig) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return CompletableFuture.completedFuture(StringUtils.EMPTY);
+    }
+    return deleteByQueryAsync(
+        clientForIndex(opContext, indexName), opContext, indexName, query, overrideConfig);
+  }
+
+  @Nonnull
+  public CompletableFuture<String> deleteByQueryAsync(
+      @Nonnull OperationContext opContext,
+      @Nonnull SearchComponent component,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nullable BulkDeleteConfiguration overrideConfig) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return CompletableFuture.completedFuture(StringUtils.EMPTY);
+    }
+    return deleteByQueryAsync(
+        SearchClients.forComponent(opContext, component),
+        opContext,
+        indexName,
+        query,
+        overrideConfig);
+  }
+
+  @Nonnull
+  private CompletableFuture<String> deleteByQueryAsync(
+      @Nonnull SearchClientShim<?> client,
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nullable BulkDeleteConfiguration overrideConfig) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return CompletableFuture.completedFuture(StringUtils.EMPTY);
+    }
+
+    final BulkDeleteConfiguration finalConfig =
+        overrideConfig != null ? overrideConfig : config.getBulkDelete();
+
+    return CompletableFuture.supplyAsync(
+        () -> {
+          try {
+            DeleteByQueryRequest request = buildDeleteByQueryRequest(indexName, query, finalConfig);
+
+            // Submit the task asynchronously
+            String taskId =
+                client.submitDeleteByQueryTask(opContext, request, RequestOptions.DEFAULT);
+
+            log.info("Started async delete by query task: {} for index: {}", taskId, indexName);
+
+            return taskId;
+          } catch (IOException e) {
+            log.error("Failed to start async delete by query for index: {}", indexName, e);
+            throw new RuntimeException("Failed to start async delete by query", e);
+          }
+        });
+  }
+
+  /**
+   * Performs asynchronous delete by query operation with monitoring Blocks until completion and
+   * retries if documents remain
+   */
+  @Nonnull
+  public DeleteByQueryResult deleteByQuerySync(
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nullable BulkDeleteConfiguration overrideConfig) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return DeleteByQueryResult.builder().build();
+    }
+    return deleteByQuerySync(
+        clientForIndex(opContext, indexName), opContext, indexName, query, overrideConfig);
+  }
+
+  @Nonnull
+  public DeleteByQueryResult deleteByQuerySync(
+      @Nonnull OperationContext opContext,
+      @Nonnull SearchComponent component,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nullable BulkDeleteConfiguration overrideConfig) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return DeleteByQueryResult.builder().build();
+    }
+    return deleteByQuerySync(
+        SearchClients.forComponent(opContext, component),
+        opContext,
+        indexName,
+        query,
+        overrideConfig);
+  }
+
+  @Nonnull
+  private DeleteByQueryResult deleteByQuerySync(
+      @Nonnull SearchClientShim<?> client,
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nullable BulkDeleteConfiguration overrideConfig) {
+    if (!canWrite) {
+      log.warn(READ_ONLY_LOG);
+      return DeleteByQueryResult.builder().build();
+    }
+    final BulkDeleteConfiguration finalConfig =
+        overrideConfig != null ? overrideConfig : config.getBulkDelete();
+
+    long startTime = System.currentTimeMillis();
+    long totalDeleted = 0;
+    int retryAttempts = 0;
+    TaskId lastTaskId = null;
+
+    try {
+      // Get initial document count
+      long initialCount = countDocuments(client, opContext, indexName, query);
+      if (initialCount == 0) {
+        return DeleteByQueryResult.builder()
+            .timeTaken(System.currentTimeMillis() - startTime)
+            .success(true)
+            .remainingDocuments(0)
+            .retryAttempts(0)
+            .build();
+      }
+
+      log.info("Starting delete by query for index: {} with {} documents", indexName, initialCount);
+
+      long remainingDocs = initialCount;
+      long previousRemainingDocs = initialCount;
+
+      while (remainingDocs > 0 && retryAttempts < finalConfig.getNumRetries()) {
+        long countBeforeDelete = remainingDocs;
+
+        // Submit delete by query task
+        DeleteByQueryRequest request = buildDeleteByQueryRequest(indexName, query, finalConfig);
+
+        String taskSubmission =
+            client.submitDeleteByQueryTask(opContext, request, RequestOptions.DEFAULT);
+        TaskId taskId = parseTaskId(taskSubmission);
+        lastTaskId = taskId;
+
+        log.info("Submitted delete by query task: {} for index: {}", taskId, indexName);
+
+        // Monitor the task with context for proper tracking
+        DeleteByQueryResult iterationResult =
+            monitorDeleteByQueryTask(
+                client, opContext, taskId, finalConfig.getTimeoutDuration(), indexName, query);
+
+        // Calculate deleted count based on document count change
+        remainingDocs = iterationResult.getRemainingDocuments();
+        long deleted = 0;
+
+        if (remainingDocs >= 0 && previousRemainingDocs >= 0) {
+          deleted = previousRemainingDocs - remainingDocs;
+          if (deleted > 0) {
+            totalDeleted += deleted;
+          }
+        }
+
+        previousRemainingDocs = remainingDocs;
+
+        log.info(
+            "Delete by query iteration completed. Deleted: {}, Remaining: {}, Total deleted: {}",
+            deleted,
+            remainingDocs,
+            totalDeleted);
+
+        // Check if we made progress
+        if (!iterationResult.isSuccess()) {
+          // Task failed or timed out
+          return DeleteByQueryResult.builder()
+              .timeTaken(System.currentTimeMillis() - startTime)
+              .success(false)
+              .failureReason(iterationResult.getFailureReason())
+              .remainingDocuments(remainingDocs)
+              .retryAttempts(retryAttempts)
+              .taskId(lastTaskId)
+              .build();
+        } else if (deleted == 0 && remainingDocs == countBeforeDelete && remainingDocs > 0) {
+          log.warn("Delete by query made no progress. Documents remaining: {}", remainingDocs);
+          if (retryAttempts < finalConfig.getNumRetries() - 1) {
+            retryAttempts++;
+            // Add a small delay before retry
+            Thread.sleep(finalConfig.getPollDuration().toMillis());
+          } else {
+            // Final attempt made no progress
+            return DeleteByQueryResult.builder()
+                .timeTaken(System.currentTimeMillis() - startTime)
+                .success(false)
+                .failureReason(
+                    "Delete operation made no progress after " + (retryAttempts + 1) + " attempts")
+                .remainingDocuments(remainingDocs)
+                .retryAttempts(retryAttempts)
+                .taskId(lastTaskId)
+                .build();
+          }
+        } else if (remainingDocs > 0) {
+          retryAttempts++;
+          log.info(
+              "Retrying delete by query. Attempt {} of {}",
+              retryAttempts + 1,
+              finalConfig.getNumRetries());
+        }
+      }
+
+      return DeleteByQueryResult.builder()
+          .timeTaken(System.currentTimeMillis() - startTime)
+          .success(remainingDocs == 0)
+          .failureReason(remainingDocs > 0 ? "Documents still remaining after max retries" : null)
+          .remainingDocuments(remainingDocs)
+          .retryAttempts(retryAttempts)
+          .taskId(lastTaskId)
+          .build();
+
+    } catch (Exception e) {
+      log.error("Delete by query failed for index: {}", indexName, e);
+      return DeleteByQueryResult.builder()
+          .timeTaken(System.currentTimeMillis() - startTime)
+          .success(false)
+          .failureReason("Exception: " + e.getMessage())
+          .remainingDocuments(-1) // Unknown
+          .retryAttempts(retryAttempts)
+          .taskId(lastTaskId)
+          .build();
+    }
+  }
+
+  /**
+   * Monitor the status of an async delete by query task For internal use with context to properly
+   * track deletions
+   */
+  @VisibleForTesting
+  @Nonnull
+  public DeleteByQueryResult monitorDeleteByQueryTask(
+      @Nonnull OperationContext opContext,
+      @Nonnull TaskId taskId,
+      @Nullable Duration timeout,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query) {
+    return monitorDeleteByQueryTask(
+        clientForIndex(opContext, indexName), opContext, taskId, timeout, indexName, query);
+  }
+
+  @Nonnull
+  private DeleteByQueryResult monitorDeleteByQueryTask(
+      @Nonnull SearchClientShim<?> client,
+      @Nonnull OperationContext opContext,
+      @Nonnull TaskId taskId,
+      @Nullable Duration timeout,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query) {
+    Duration finalTimeout = timeout != null ? timeout : config.getBulkDelete().getTimeoutDuration();
+    long startTime = System.currentTimeMillis();
+
+    try {
+      GetTaskRequest getTaskRequest = new GetTaskRequest(taskId.getNodeId(), taskId.getId());
+      getTaskRequest.setWaitForCompletion(true);
+      getTaskRequest.setTimeout(TimeValue.timeValueMillis(finalTimeout.toMillis()));
+
+      Optional<GetTaskResponse> taskResponse =
+          client.getTask(getTaskRequest, RequestOptions.DEFAULT);
+
+      if (taskResponse.isEmpty() || !taskResponse.get().isCompleted()) {
+        // Count remaining documents to determine if any progress was made
+        long remainingDocs = countDocuments(client, opContext, indexName, query);
+
+        return DeleteByQueryResult.builder()
+            .timeTaken(System.currentTimeMillis() - startTime)
+            .success(false)
+            .failureReason("Task not completed within timeout")
+            .remainingDocuments(remainingDocs)
+            .retryAttempts(0)
+            .taskId(taskId)
+            .build();
+      }
+
+      // Task completed - count remaining documents to determine success
+      long remainingDocs = countDocuments(client, opContext, indexName, query);
+
+      // We can't get exact delete count from task API, but we can infer success
+      // from whether documents remain
+      return DeleteByQueryResult.builder()
+          .timeTaken(System.currentTimeMillis() - startTime)
+          .success(true) // Task completed successfully
+          .failureReason(null)
+          .remainingDocuments(remainingDocs)
+          .retryAttempts(0)
+          .taskId(taskId)
+          .build();
+
+    } catch (Exception e) {
+      log.error("Failed to monitor delete by query task: {}", taskId, e);
+
+      // Try to get remaining count even on error
+      long remainingDocs = -1;
+      try {
+        remainingDocs = countDocuments(client, opContext, indexName, query);
+      } catch (Exception countError) {
+        log.error("Failed to count remaining documents", countError);
+      }
+
+      return DeleteByQueryResult.builder()
+          .timeTaken(System.currentTimeMillis() - startTime)
+          .success(false)
+          .failureReason("Monitoring failed: " + e.getMessage())
+          .remainingDocuments(remainingDocs)
+          .retryAttempts(0)
+          .taskId(taskId)
+          .build();
+    }
+  }
+
+  /**
+   * Same rule as {@code EntitySearchIndexResolver.shouldReadV3}: a missing V2 block with V3 on
+   * means V2 is off, so writes follow the index family reads use.
+   */
+  private boolean v2EntityIndexDisabled() {
+    EntityIndexConfiguration entityIndex = config.getEntityIndex();
+    if (entityIndex == null) {
+      return false;
+    }
+    if (entityIndex.getV2() != null) {
+      return !entityIndex.getV2().isEnabled();
+    }
+    return entityIndex.getV3() != null && entityIndex.getV3().isEnabled();
+  }
+
+  private static String toIndexName(
+      @Nonnull OperationContext opContext, @Nonnull String entityName) {
+    return opContext
+        .getSearchContext()
+        .getIndexConvention()
+        .getIndexName(opContext, opContext.getEntityRegistry().getEntitySpec(entityName));
+  }
+
+  private static String toIndexNameV3(
+      @Nonnull OperationContext opContext, @Nonnull String searchGroup) {
+    return opContext
+        .getSearchContext()
+        .getIndexConvention()
+        .getEntityIndexNameV3(opContext, searchGroup);
+  }
+
+  private DeleteByQueryRequest buildDeleteByQueryRequest(
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query,
+      @Nonnull BulkDeleteConfiguration config) {
+
+    DeleteByQueryRequest request = new DeleteByQueryRequest(indexName);
+    request.setQuery(query);
+    request.setBatchSize(config.getBatchSize());
+
+    // Handle slices configuration - can be "auto" or a number
+    if (!AUTO_SLICES_VALUE.equalsIgnoreCase(config.getSlices())) {
+      try {
+        int sliceCount = Integer.parseInt(config.getSlices());
+        request.setSlices(sliceCount);
+      } catch (NumberFormatException e) {
+        log.warn("Invalid slices value '{}', defaulting to 'auto'", config.getSlices());
+        request.setSlices(AUTO_SLICES);
+      }
+    } else {
+      request.setSlices(AUTO_SLICES);
+    }
+
+    request.setTimeout(TimeValue.timeValueMillis(config.getTimeoutDuration().toMillis()));
+
+    // Set conflicts strategy to proceed (skip conflicting documents)
+    request.setConflicts("proceed");
+    // Progress is measured by counting what remains, which only sees the deletes after a refresh.
+    // Without it an index with a long or disabled refresh interval reports no progress.
+    request.setRefresh(true);
+
+    return request;
+  }
+
+  private long countDocuments(
+      @Nonnull SearchClientShim<?> client,
+      @Nonnull OperationContext opContext,
+      @Nonnull String indexName,
+      @Nonnull QueryBuilder query)
+      throws IOException {
+
+    CountRequest countRequest = new CountRequest(indexName);
+    countRequest.query(query);
+    CountResponse countResponse = client.count(opContext, countRequest, RequestOptions.DEFAULT);
+    return countResponse.getCount();
+  }
+
+  /** Parse task ID from the task string format "nodeId:taskId" */
+  private TaskId parseTaskId(String taskString) {
+    if (taskString == null || !taskString.contains(":")) {
+      throw new IllegalArgumentException("Invalid task string format: " + taskString);
+    }
+    String[] parts = taskString.split(":", 2);
+    return new TaskId(parts[0], Long.parseLong(parts[1]));
   }
 }

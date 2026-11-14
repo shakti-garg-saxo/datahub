@@ -1,44 +1,81 @@
 package controllers;
 
+import auth.sso.SsoManager;
+import com.linkedin.metadata.utils.BasePathUtils;
 import com.typesafe.config.Config;
-import org.pac4j.play.LogoutController;
-import play.mvc.Result;
-
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import javax.annotation.Nonnull;
 import javax.inject.Inject;
-import java.util.concurrent.ExecutionException;
+import lombok.extern.slf4j.Slf4j;
+import org.pac4j.play.LogoutController;
+import play.mvc.Http;
+import play.mvc.Result;
+import play.mvc.Results;
 
-/**
- * Responsible for handling logout logic with oidc providers
- */
+/** Responsible for handling logout logic with oidc providers */
+@Slf4j
 public class CentralLogoutController extends LogoutController {
-
-  private static final String AUTH_BASE_URL_CONFIG_PATH = "auth.baseUrl";
+  private static final String AUTH_URL_CONFIG_PATH = "/login";
   private static final String DEFAULT_BASE_URL_PATH = "/";
-  private static Boolean _isOidcEnabled = false;
 
-  @Inject
-  public CentralLogoutController(Config config) {
+  @Inject private SsoManager ssoManager;
+  @Inject private Config config;
+  @Inject private ProxyAdmission proxyAdmission;
 
-    String _authBaseUrl = config.hasPath(AUTH_BASE_URL_CONFIG_PATH)
-            ? config.getString(AUTH_BASE_URL_CONFIG_PATH)
-            : DEFAULT_BASE_URL_PATH;
+  private String loginUrl;
+  private String logoutPattern;
 
-    _isOidcEnabled = config.hasPath("auth.oidc.enabled") && config.getBoolean("auth.oidc.enabled");
-
-    setDefaultUrl(_authBaseUrl);
-    setLogoutUrlPattern(_authBaseUrl + ".*");
+  public CentralLogoutController() {
     setLocalLogout(true);
     setCentralLogout(true);
-
   }
 
   /**
-   * logout() method should not be called if oidc is not enabled
+   * Gets the configured base path for DataHub.
+   *
+   * @return the normalized base path
    */
-  public Result executeLogout() throws ExecutionException, InterruptedException {
-    if (_isOidcEnabled) {
-      return logout().toCompletableFuture().get();
+  @Nonnull
+  private String getBasePath() {
+    return BasePathUtils.normalizeBasePath(config.getString("datahub.basePath"));
+  }
+
+  /** logout() method should not be called if oidc is not enabled */
+  public Result executeLogout(Http.Request request) {
+    String basePath = getBasePath();
+    // Initialize URLs with proper base path
+    loginUrl = BasePathUtils.addBasePath(AUTH_URL_CONFIG_PATH, basePath);
+    logoutPattern =
+        (basePath == null || basePath.isEmpty()) ? DEFAULT_BASE_URL_PATH + ".*" : basePath + "/.*";
+
+    setDefaultUrl(loginUrl);
+    setLogoutUrlPattern(logoutPattern);
+
+    if (ssoManager.isSsoEnabled()) {
+      return ProxyAdmission.admit(
+          proxyAdmission,
+          () -> {
+            try {
+              return logout(request).toCompletableFuture().get().withNewSession();
+            } catch (Exception e) {
+              log.error(
+                  "Caught exception while attempting to perform SSO logout! It's likely that SSO integration is mis-configured.",
+                  e);
+
+              String errorLoginUrl =
+                  String.format(
+                      "%s?error_msg=%s",
+                      loginUrl,
+                      URLEncoder.encode(
+                          "Failed to sign out using Single Sign-On provider. Please contact your DataHub Administrator, "
+                              + "or refer to server logs for more information.",
+                          StandardCharsets.UTF_8));
+
+              return redirect(errorLoginUrl).withNewSession();
+            }
+          });
     }
-    return redirect("/");
+    return Results.redirect(loginUrl).withNewSession();
   }
 }

@@ -1,30 +1,47 @@
 package auth.sso.oidc.custom;
 
+import auth.sso.oidc.OidcConfigs;
 import org.pac4j.core.util.CommonHelper;
 import org.pac4j.oidc.client.OidcClient;
 import org.pac4j.oidc.config.OidcConfiguration;
-import org.pac4j.oidc.credentials.extractor.OidcExtractor;
+import org.pac4j.oidc.credentials.extractor.OidcCredentialsExtractor;
 import org.pac4j.oidc.logout.OidcLogoutActionBuilder;
-import org.pac4j.oidc.profile.OidcProfile;
-import org.pac4j.oidc.profile.creator.OidcProfileCreator;
-import org.pac4j.oidc.redirect.OidcRedirectActionBuilder;
+import org.pac4j.oidc.logout.processor.OidcLogoutProcessor;
 
+public class CustomOidcClient extends OidcClient {
 
-public class CustomOidcClient extends OidcClient<OidcProfile, OidcConfiguration> {
+  private final OidcConfigs oidcConfigs;
 
-  public CustomOidcClient(final OidcConfiguration configuration) {
-    setConfiguration(configuration);
+  public CustomOidcClient(OidcConfiguration configuration, OidcConfigs oidcConfigs) {
+    super(configuration);
+    this.oidcConfigs = oidcConfigs;
   }
 
   @Override
-  protected void clientInit() {
+  protected void internalInit(final boolean forceReinit) {
+    // Validate configuration
     CommonHelper.assertNotNull("configuration", getConfiguration());
-    getConfiguration().init();
 
-    defaultRedirectActionBuilder(new OidcRedirectActionBuilder(getConfiguration(), this));
-    defaultCredentialsExtractor(new OidcExtractor(getConfiguration(), this));
-    defaultAuthenticator(new CustomOidcAuthenticator(getConfiguration(), this));
-    defaultProfileCreator(new OidcProfileCreator<>(getConfiguration()));
-    defaultLogoutActionBuilder(new OidcLogoutActionBuilder<>(getConfiguration()));
+    getConfiguration().init(this.getClass().getSimpleName(), forceReinit);
+
+    // Initialize client components
+    setRedirectionActionBuilderIfUndefined(
+        new CustomOidcRedirectionActionBuilder(getConfiguration(), this));
+    setCredentialsExtractorIfUndefined(new OidcCredentialsExtractor(getConfiguration(), this));
+
+    // Initialize default authenticator if not set
+    if (getAuthenticator() == null || forceReinit) {
+      if (forceReinit) {
+        setAuthenticator(new CustomOidcAuthenticator(this, oidcConfigs));
+      } else {
+        setAuthenticatorIfUndefined(new CustomOidcAuthenticator(this, oidcConfigs));
+      }
+    }
+
+    setProfileCreatorIfUndefined(
+        new CustomOidcProfileCreator(getConfiguration(), this, oidcConfigs));
+    setLogoutProcessorIfUndefined(
+        new OidcLogoutProcessor(getConfiguration(), findSessionLogoutHandler()));
+    setLogoutActionBuilderIfUndefined(new OidcLogoutActionBuilder(getConfiguration()));
   }
 }

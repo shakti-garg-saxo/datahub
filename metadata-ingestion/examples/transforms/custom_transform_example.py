@@ -1,28 +1,26 @@
-# see https://datahubproject.io/docs/metadata-ingestion/transformers for original tutorial
-from datahub.configuration.common import ConfigModel
-
-
-class AddCustomOwnershipConfig(ConfigModel):
-    owners_json: str
-
-
+# see https://docs.datahub.com/docs/metadata-ingestion/transformers for original tutorial
 import json
-from typing import Iterable
+from typing import List, Optional
 
-import datahub.emitter.mce_builder as builder
-from datahub.configuration.common import ConfigModel
-from datahub.ingestion.api.common import PipelineContext, RecordEnvelope
-from datahub.ingestion.api.transform import Transformer
+from datahub.configuration.common import ConfigModel, TransformerSemantics
+from datahub.ingestion.api.common import PipelineContext
+from datahub.ingestion.transformer.base_transformer import (
+    BaseTransformer,
+    SingleAspectTransformer,
+)
 from datahub.metadata.schema_classes import (
-    DatasetSnapshotClass,
-    MetadataChangeEventClass,
     OwnerClass,
     OwnershipClass,
     OwnershipTypeClass,
 )
 
 
-class AddCustomOwnership(Transformer):
+class AddCustomOwnershipConfig(ConfigModel):
+    owners_json: str
+    semantics: TransformerSemantics = TransformerSemantics.OVERWRITE
+
+
+class AddCustomOwnership(BaseTransformer, SingleAspectTransformer):
     """Transformer that adds owners to datasets according to a callback function."""
 
     # context param to generate run metadata such as a run ID
@@ -30,7 +28,8 @@ class AddCustomOwnership(Transformer):
     # as defined in the previous block
     config: AddCustomOwnershipConfig
 
-    def __init__(self, config: AddCustomOwnershipConfig, ctx: PipelineContext):
+    def __init__(self, config: AddCustomOwnershipConfig, ctx: PipelineContext) -> None:
+        super().__init__()
         self.ctx = ctx
         self.config = config
 
@@ -47,31 +46,26 @@ class AddCustomOwnership(Transformer):
         config = AddCustomOwnershipConfig.parse_obj(config_dict)
         return cls(config, ctx)
 
-    def transform(
-        self, record_envelopes: Iterable[RecordEnvelope]
-    ) -> Iterable[RecordEnvelope]:
+    def entity_types(self) -> List[str]:
+        return ["dataset"]
 
-        # loop over envelopes
-        for envelope in record_envelopes:
+    def aspect_name(self) -> str:
+        return "ownership"
 
-            # if envelope is an MCE, add the ownership classes
-            if isinstance(envelope.record, MetadataChangeEventClass):
-                envelope.record = self.transform_one(envelope.record)
-            yield envelope
-
-    def transform_one(self, mce: MetadataChangeEventClass) -> MetadataChangeEventClass:
-        if not isinstance(mce.proposedSnapshot, DatasetSnapshotClass):
-            return mce
-
+    def transform_aspect(  # type: ignore
+        self, entity_urn: str, aspect_name: str, aspect: Optional[OwnershipClass]
+    ) -> Optional[OwnershipClass]:
         owners_to_add = self.owners
+        assert aspect is None or isinstance(aspect, OwnershipClass)
 
-        if owners_to_add:
-            ownership = builder.get_or_add_aspect(
-                mce,
-                OwnershipClass(
-                    owners=[],
-                ),
-            )
-            ownership.owners.extend(owners_to_add)
+        # Returning the incoming aspect unchanged is the correct no-op here; returning
+        # None would suppress the aspect entirely.
+        if not owners_to_add:
+            return aspect
 
-        return mce
+        ownership = aspect or OwnershipClass(
+            owners=[],
+        )
+        ownership.owners.extend(owners_to_add)
+
+        return ownership

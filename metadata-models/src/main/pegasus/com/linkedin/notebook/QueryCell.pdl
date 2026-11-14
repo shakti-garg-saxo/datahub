@@ -1,0 +1,33 @@
+namespace com.linkedin.notebook
+
+import com.linkedin.common.AuditStamp
+
+/**
+ * Query cell in a Notebook, which will present content in query format
+ */
+record QueryCell includes CommonCellAttributes {
+
+  /**
+   * Raw query to explain some specific logic in a Notebook
+   */
+  @Searchable = {
+    "fieldType": "RICH_TEXT",
+    "queryByDefault": false,
+    "v3": {
+      "queryByDefault": false,
+      "boostScore": 0.5,
+      "searchLabel": "queryText",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  rawQuery: string
+
+  /**
+   * Captures information about who last executed this query cell and when
+   */
+  lastExecuted: optional AuditStamp
+}

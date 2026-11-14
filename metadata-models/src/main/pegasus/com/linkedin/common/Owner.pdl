@@ -11,23 +11,66 @@ record Owner {
    */
   @Relationship = {
     "name": "OwnedBy",
-    "entityTypes": [ "corpUser", "corpGroup" ]
+    "entityTypes": [ "corpuser", "corpGroup" ]
   }
   @Searchable = {
     "fieldName": "owners",
     "fieldType": "URN",
+    "addToFilters": true,
     "hasValuesFieldName": "hasOwners",
-    "queryByDefault": false
+    "queryByDefault": false,
+    "filterNameOverride": "Owned By",
+    "v3": {
+
+      "searchLabel": "owners",
+      "hasValuesFieldName": "hasOwners",
+      "mappings": [
+        { "type": "URN" }
+      ]
+    }
   }
   owner: Urn
 
   /**
    * The type of the ownership
    */
+  @deprecated
   type: OwnershipType
+
+  /**
+   * The type of the ownership
+   * Urn of type O
+   */
+  @Relationship = {
+    "name": "ownershipType",
+    "entityTypes": [ "ownershipType" ]
+  }
+  typeUrn: optional Urn
 
   /**
    * Source information for the ownership
    */
   source: optional OwnershipSource
+
+  /**
+   * Information about who, why, and how this metadata was applied
+   */
+  @Searchable = {
+    "/time": {
+        "fieldName": "ownerAttributionDates",
+        "fieldType": "DATETIME",
+        "queryByDefault": false,
+      },
+    "/actor": {
+        "fieldName": "ownerAttributionActors",
+        "fieldType": "URN",
+        "queryByDefault": false,
+      },
+    "/source": {
+        "fieldName": "ownerAttributionSources",
+        "fieldType": "URN",
+        "queryByDefault": false,
+      },
+  }
+  attribution: optional MetadataAttribution
 }

@@ -17,6 +17,37 @@ record EditableDatasetProperties includes ChangeAuditStamps {
   @Searchable = {
     "fieldType": "TEXT",
     "fieldName": "editedDescription",
+    "sanitizeRichText": true,
+    "hasValuesFieldName": "hasDescription",
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "description",
+      "mappings": [
+        { "type": "KEYWORD", "index": false, "docValues": false },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
   }
   description: optional string
+
+  /**
+   * Editable display name of the Dataset
+   */
+  @Searchable = {
+    "fieldType": "TEXT_PARTIAL",
+    "fieldName": "editedName",
+    "boostScore": 10.0,
+    "v3": {
+      "queryByDefault": true,
+      "searchLabel": "name",
+      "lowercase": true,
+      "mappings": [
+        { "type": "KEYWORD" },
+        { "subfield": "text", "type": "TEXT" },
+        { "subfield": "stemmed", "type": "STEMMED" }
+      ]
+    }
+  }
+  name: optional string
 }

@@ -3,6 +3,10 @@
 [Locust](https://locust.io/) is an open-source, python-based, easy-to-use load testing tool. It provides an interface to
 spawn multiple users (swarm) that behave according to pre-defined python code.
 
+## Authz persona performance (`authz-perf/`)
+
+For **authorization policy evaluation latency** (17 personas, frontend GraphQL, JSONL bisect/compare), see [`authz-perf/README.md`](./authz-perf/README.md). This is separate from Locust — different venv, different result store, not part of smoke-test.
+
 In this directory, we provide some example locust configs that send common requests to DataHub GMS (ingest, search,
 browse, and graph).
 
@@ -16,6 +20,12 @@ pip3 install locust
 
 Note that it supports python versions 3.6 and up. Refer to
 this [guide](https://docs.locust.io/en/stable/installation.html) for more details.
+
+You will also need to import requirements in order to run the Locustfile scripts:
+
+```shell
+pip3 install -r requirements.txt
+```
 
 ## Locustfiles
 
@@ -53,7 +63,9 @@ locust -f perf-test/locustfiles/ingest.py
 This will set up the web interface in http://localhost:8089 (unless the port is already taken). Once you click into it,
 you should see the following
 
-![Locust Example](../docs/imgs/locust-example.png)
+<p align="center">
+  <img width="70%"  src="https://raw.githubusercontent.com/datahub-project/static-assets/main/imgs/locust-example.png"/>
+</p>
 
 Input the number of users you would like to spawn and the spawn rate. Point the host to the deployed DataHub GMS (
 locally, it should be http://localhost:8080). Click on the "Start swarming" button to start the load test.
